@@ -1,8 +1,9 @@
 # AgentNews
 
-AgentNews is a personal AI news digest agent. This repository currently contains
-the Python project baseline and a minimal command-line entry point; agent,
-search, report, API, and email features are not implemented yet.
+AgentNews is a personal AI news digest agent. The repository currently includes
+the Python project baseline, SQLite migrations, Markdown report storage, and a
+minimal command-line entry point; agent, search, report generation, API, and
+email features are not implemented yet.
 
 ## Requirements
 
@@ -46,6 +47,15 @@ uv run agentnews
 
 The command initializes the SQLite database at `SQLITE_PATH` and applies any
 pending migrations before reporting that the CLI is ready.
+
+## Report storage
+
+Markdown reports are stored beneath `REPORT_ROOT` (default: `data/reports`) in
+`YYYY-MM-DD/<report-id>-<slug>.md` paths. Paths returned by the report storage
+layer are relative to that root and can be stored in the SQLite report index.
+Saving the same report path and content is idempotent; different content at an
+existing report path is rejected. Identical content for different report IDs is
+stored separately and has the same SHA-256 content hash.
 
 ## Test
 
