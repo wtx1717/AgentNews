@@ -44,6 +44,9 @@ Never commit `.env` or paste credentials into chat; `.env` is ignored by Git.
 uv run agentnews
 ```
 
+The command initializes the SQLite database at `SQLITE_PATH` and applies any
+pending migrations before reporting that the CLI is ready.
+
 ## Test
 
 ```powershell
