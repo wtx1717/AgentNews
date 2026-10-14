@@ -59,10 +59,13 @@ class ManagedPathResolver:
         *,
         expected_type: PathKind = "any",
         allow_missing_leaf: bool = False,
+        check_file_size: bool = True,
     ) -> Path:
         """Return the resolved in-root path after validating its type and size."""
         if expected_type not in {"any", "file", "directory"}:
             raise ValueError("expected_type must be 'any', 'file', or 'directory'")
+        if not isinstance(check_file_size, bool):
+            raise ValueError("check_file_size must be a boolean")
 
         raw_path = os.fspath(path)
         if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
@@ -91,7 +94,7 @@ class ManagedPathResolver:
         if resolved.exists():
             file_stat = resolved.stat()
             if stat.S_ISREG(file_stat.st_mode):
-                if file_stat.st_size > self.max_file_size_bytes:
+                if check_file_size and file_stat.st_size > self.max_file_size_bytes:
                     raise FileTooLargeError("file exceeds the configured size limit")
                 if expected_type == "directory":
                     raise PathTypeError("path must refer to a directory")
