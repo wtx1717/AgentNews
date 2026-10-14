@@ -1,14 +1,15 @@
-import asyncio
 import logging
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
-from langchain_core.runnables import RunnableLambda
+from langchain_core.outputs import Generation, LLMResult
+from langchain_openai import ChatOpenAI
 
 from agentnews.config import Settings
-from agentnews.deepseek import (
+from agentnews.agent.models.deepseek import (
     DeepSeekAuthenticationError,
-    DeepSeekChatAdapter,
+    DeepSeekLoggingCallback,
     DeepSeekModelError,
     DeepSeekRateLimitError,
     DeepSeekTimeoutError,
@@ -27,38 +28,37 @@ def _settings(**overrides):
     )
 
 
-def test_factory_initializes_openai_compatible_client_and_invokes(monkeypatch, caplog):
+def test_factory_returns_native_langchain_chat_model(monkeypatch):
     calls = {}
 
-    class MockChatOpenAI:
+    class SpyChatOpenAI(ChatOpenAI):
         def __init__(self, **kwargs):
             calls.update(kwargs)
+            super().__init__(**kwargs)
 
-        def invoke(self, value, config=None, **kwargs):
-            calls["input"] = value
-            return "mock response"
-
-    monkeypatch.setattr("agentnews.deepseek.ChatOpenAI", MockChatOpenAI)
-    caplog.set_level(logging.INFO, logger="agentnews.deepseek")
-
-    adapter = create_deepseek_model(
+    monkeypatch.setattr(
+        "agentnews.agent.models.deepseek.ChatOpenAI", SpyChatOpenAI
+    )
+    model = create_deepseek_model(
         _settings(deepseek_timeout=12, deepseek_max_retries=3)
     )
-    result = adapter.invoke("private prompt")
 
-    assert result == "mock response"
+    assert isinstance(model, ChatOpenAI)
+    assert callable(model.bind_tools)
+    assert callable(model.stream)
+    assert callable(model.astream)
+    assert callable(model.with_structured_output)
     assert calls == {
         "model": "deepseek-chat",
         "api_key": "test-api-key",
         "base_url": "https://api.deepseek.com",
         "timeout": 12,
         "max_retries": 3,
-        "input": "private prompt",
+        "callbacks": model.callbacks,
     }
-    assert "DeepSeek invocation completed" in caplog.text
-    assert "private prompt" not in caplog.text
-    assert "mock response" not in caplog.text
-    assert "test-api-key" not in caplog.text
+    assert len(model.callbacks) == 1
+    assert isinstance(model.callbacks[0], DeepSeekLoggingCallback)
+    assert model.callbacks[0].model_name == "deepseek-chat"
 
 
 def test_factory_rejects_missing_credentials_before_client_initialization(monkeypatch):
@@ -66,7 +66,8 @@ def test_factory_rejects_missing_credentials_before_client_initialization(monkey
         pytest.fail("client must not be initialized without credentials")
 
     monkeypatch.setattr(
-        "agentnews.deepseek.ChatOpenAI", unexpected_client_initialization
+        "agentnews.agent.models.deepseek.ChatOpenAI",
+        unexpected_client_initialization,
     )
 
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY, DEEPSEEK_MODEL"):
@@ -79,7 +80,9 @@ def test_factory_maps_initialization_error_without_leaking_details(monkeypatch):
     def broken_client(**kwargs):
         raise RuntimeError(secret)
 
-    monkeypatch.setattr("agentnews.deepseek.ChatOpenAI", broken_client)
+    monkeypatch.setattr(
+        "agentnews.agent.models.deepseek.ChatOpenAI", broken_client
+    )
 
     with pytest.raises(DeepSeekModelError, match="DeepSeek request failed") as exc_info:
         create_deepseek_model(_settings())
@@ -88,50 +91,41 @@ def test_factory_maps_initialization_error_without_leaking_details(monkeypatch):
     assert exc_info.value.__cause__ is None
 
 
-def test_timeout_is_mapped_and_failure_logs_are_redacted(caplog):
-    secret = "sensitive prompt and API key"
-
-    def timeout(_):
-        raise TimeoutError(secret)
-
-    adapter = DeepSeekChatAdapter(RunnableLambda(timeout), "deepseek-chat")
-    caplog.set_level(logging.WARNING, logger="agentnews.deepseek")
-
-    with pytest.raises(DeepSeekTimeoutError, match="request timed out"):
-        adapter.invoke(secret)
-
-    assert secret not in caplog.text
-    assert "DeepSeekTimeoutError" in caplog.text
-
-
-def test_adapter_preserves_tool_binding():
-    class BindableModel:
-        def bind_tools(self, tools, **kwargs):
-            assert tools == ["mock-tool"]
-            assert kwargs == {"tool_choice": "auto"}
-            return RunnableLambda(lambda _: "tool-enabled response")
-
-    adapter = DeepSeekChatAdapter(BindableModel(), "deepseek-chat")
-    bound = adapter.bind_tools(["mock-tool"], tool_choice="auto")
-
-    assert isinstance(bound, DeepSeekChatAdapter)
-    assert bound.invoke("prompt") == "tool-enabled response"
-
-
-def test_adapter_supports_async_model_invocation():
-    async def mock_async_model(value):
-        return f"async: {value}"
-
-    adapter = DeepSeekChatAdapter(
-        RunnableLambda(mock_async_model), "deepseek-chat"
+def test_logging_callback_redacts_success_and_error_details(caplog):
+    callback = DeepSeekLoggingCallback("deepseek-chat")
+    input_secret = "private prompt"
+    output_secret = "private response"
+    error_secret = "private provider error and test-api-key"
+    caplog.set_level(
+        logging.INFO, logger="agentnews.agent.models.deepseek"
     )
 
-    assert asyncio.run(adapter.ainvoke("request")) == "async: request"
+    run_id = uuid4()
+    callback.on_chat_model_start(
+        {"id": ["private-client"]}, [[input_secret]], run_id=run_id
+    )
+    callback.on_llm_end(
+        LLMResult(generations=[[Generation(text=output_secret)]]), run_id=run_id
+    )
+
+    error_run_id = uuid4()
+    callback.on_chat_model_start({}, [[input_secret]], run_id=error_run_id)
+    callback.on_llm_error(RuntimeError(error_secret), run_id=error_run_id)
+
+    assert "invocation completed" in caplog.text
+    assert "invocation failed" in caplog.text
+    assert "DeepSeekModelError" in caplog.text
+    assert "duration_ms=" in caplog.text
+    assert input_secret not in caplog.text
+    assert output_secret not in caplog.text
+    assert error_secret not in caplog.text
+    assert "private-client" not in caplog.text
 
 
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
+        (TimeoutError("private timeout"), DeepSeekTimeoutError),
         (SimpleNamespace(status_code=401), DeepSeekAuthenticationError),
         (SimpleNamespace(status_code=403), DeepSeekAuthenticationError),
         (SimpleNamespace(status_code=429), DeepSeekRateLimitError),

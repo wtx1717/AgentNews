@@ -1,6 +1,7 @@
 from .config import Settings, get_settings
 from .db import initialize_database
-from .report_storage import (
+from .main import main
+from .repositories.report_storage import (
     InvalidReportPathError,
     ReportConflictError,
     ReportStorage,
@@ -17,9 +18,3 @@ __all__ = [
     "initialize_database",
     "main",
 ]
-
-
-def main(settings: Settings | None = None) -> None:
-    settings = settings or get_settings()
-    initialize_database(settings.sqlite_path)
-    print("AgentNews command-line scaffold is ready.")

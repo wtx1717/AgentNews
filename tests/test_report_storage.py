@@ -3,11 +3,16 @@ import hashlib
 
 import pytest
 
-from agentnews.report_storage import (
+from agentnews import ReportStorage as PublicReportStorage
+from agentnews.repositories.report_storage import (
     InvalidReportPathError,
     ReportConflictError,
     ReportStorage,
 )
+
+
+def test_report_storage_is_reexported_from_package_root():
+    assert PublicReportStorage is ReportStorage
 
 
 def test_save_and_read_report_creates_root_and_date_directory(tmp_path):

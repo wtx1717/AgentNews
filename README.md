@@ -66,7 +66,10 @@ uv run pytest
 
 ## Project layout
 
-- `src/agentnews/`: application package and command-line entry point.
+- `src/agentnews/agent/models/`: LangChain model integrations.
+- `src/agentnews/repositories/`: report file storage and persistence adapters.
+- `src/agentnews/tools/` and `src/agentnews/db/`: local tools and SQLite infrastructure.
+- `src/agentnews/main.py`: command-line entry point; `config.py` loads settings.
 - `tests/`: automated tests.
 - `data/`: local runtime data such as reports and the SQLite database. Generated
   contents are ignored by Git.
