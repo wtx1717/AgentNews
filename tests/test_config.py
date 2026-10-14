@@ -12,17 +12,37 @@ def test_local_defaults_load_without_service_credentials():
     assert settings.sqlite_path.as_posix() == "data/agentnews.sqlite3"
     assert settings.smtp_port == 587
     assert settings.deepseek_api_key is None
+    assert settings.deepseek_timeout == 30
+    assert settings.deepseek_max_retries == 2
 
 
 def test_environment_values_override_dotenv(tmp_path, monkeypatch):
     dotenv = tmp_path / ".env"
     dotenv.write_text("APP_TIMEZONE=UTC\nSMTP_PORT=2525\n", encoding="utf-8")
     monkeypatch.setenv("APP_TIMEZONE", "Asia/Tokyo")
+    monkeypatch.setenv("DEEPSEEK_TIMEOUT", "45")
+    monkeypatch.setenv("DEEPSEEK_MAX_RETRIES", "4")
 
     settings = Settings(_env_file=dotenv)
 
     assert settings.app_timezone == "Asia/Tokyo"
     assert settings.smtp_port == 2525
+    assert settings.deepseek_timeout == 45
+    assert settings.deepseek_max_retries == 4
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"deepseek_timeout": 0},
+        {"deepseek_timeout": -1},
+        {"deepseek_max_retries": -1},
+        {"deepseek_max_retries": 11},
+    ],
+)
+def test_deepseek_timeout_and_retry_configuration_is_bounded(values):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **values)
 
 
 def test_blank_secrets_are_treated_as_unset():
