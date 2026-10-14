@@ -3,8 +3,8 @@
 AgentNews is a personal AI news digest agent. The repository includes the
 Python project baseline, SQLite migrations, local file tools, a Tavily MCP
 search adapter, Markdown report storage, and a minimal command-line entry point.
-Agent orchestration, report generation, API, and email features are not
-implemented yet.
+LangChain Agent tool orchestration is included; report generation, API, and
+email features are not implemented yet.
 
 ## Requirements
 
@@ -21,6 +21,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 Edit `.env` in the project directory. Fill in `DEEPSEEK_API_KEY` and
 `DEEPSEEK_MODEL` when enabling DeepSeek. `DEEPSEEK_TIMEOUT` (seconds, default
 30) and `DEEPSEEK_MAX_RETRIES` (default 2, maximum 10) control model requests.
+`AGENT_MAX_TOOL_CALLS` (default 8, range 1-32) limits tool executions per run.
 The Tavily search URL is preconfigured in `.env.example`; add a Tavily API key
 when enabling online search. Search timeout defaults to 20 seconds. Email
 credentials can stay empty until that integration is used.
@@ -72,6 +73,7 @@ uv run pytest
 ## Project layout
 
 - `src/agentnews/agent/models/`: LangChain model integrations.
+- `src/agentnews/agent/runner.py`: async and sync LangChain tool-calling runner.
 - `src/agentnews/tools/tavily_mcp.py`: async Tavily MCP search adapter.
 - `src/agentnews/repositories/`: report file storage and persistence adapters.
 - `src/agentnews/tools/` and `src/agentnews/db/`: local tools and SQLite infrastructure.

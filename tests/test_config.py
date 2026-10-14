@@ -14,6 +14,7 @@ def test_local_defaults_load_without_service_credentials():
     assert settings.deepseek_api_key is None
     assert settings.deepseek_timeout == 30
     assert settings.deepseek_max_retries == 2
+    assert settings.agent_max_tool_calls == 8
     assert settings.mcp_search_timeout == 20
 
 
@@ -23,6 +24,7 @@ def test_environment_values_override_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_TIMEZONE", "Asia/Tokyo")
     monkeypatch.setenv("DEEPSEEK_TIMEOUT", "45")
     monkeypatch.setenv("DEEPSEEK_MAX_RETRIES", "4")
+    monkeypatch.setenv("AGENT_MAX_TOOL_CALLS", "12")
 
     settings = Settings(_env_file=dotenv)
 
@@ -30,6 +32,7 @@ def test_environment_values_override_dotenv(tmp_path, monkeypatch):
     assert settings.smtp_port == 2525
     assert settings.deepseek_timeout == 45
     assert settings.deepseek_max_retries == 4
+    assert settings.agent_max_tool_calls == 12
 
 
 @pytest.mark.parametrize(
@@ -44,6 +47,12 @@ def test_environment_values_override_dotenv(tmp_path, monkeypatch):
 def test_deepseek_timeout_and_retry_configuration_is_bounded(values):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **values)
+
+
+@pytest.mark.parametrize("value", [0, 33, -1])
+def test_agent_tool_call_limit_is_bounded(value):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, agent_max_tool_calls=value)
 
 
 def test_blank_secrets_are_treated_as_unset():
