@@ -81,6 +81,7 @@ uv run pytest
 - `src/agentnews/repositories/`: report file storage and persistence adapters.
 - `src/agentnews/tools/` and `src/agentnews/db/`: local tools and SQLite infrastructure.
 - `src/agentnews/main.py`: command-line entry point; `config.py` loads settings.
-- `tests/`: automated tests.
+- `tests/agentnews/`: unit tests organized to mirror the `src/agentnews/` package.
+- `tests/integration/`: cross-module acceptance tests.
 - `data/`: local runtime data such as reports and the SQLite database. Generated
   contents are ignored by Git.
