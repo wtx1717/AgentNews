@@ -21,6 +21,14 @@ from .registry import (
     WriteFileInput,
     create_local_file_tools,
 )
+from .tavily_mcp import (
+    OnlineSearchResult,
+    SearchConfigurationError,
+    SearchError,
+    SearchTimeoutError,
+    SearchUnavailableError,
+    TavilyMCPClient,
+)
 
 __all__ = [
     "DirectoryEntry",
@@ -29,11 +37,17 @@ __all__ = [
     "FileToolError",
     "FileWriteResult",
     "LocalFileTools",
+    "OnlineSearchResult",
     "ListDirInput",
     "ReadFileInput",
     "SearchContentInput",
+    "SearchConfigurationError",
+    "SearchError",
     "SearchMatch",
     "SearchResult",
+    "SearchTimeoutError",
+    "SearchUnavailableError",
+    "TavilyMCPClient",
     "WriteFileInput",
     "create_local_file_tools",
     "list_dir",

@@ -1,9 +1,10 @@
 # AgentNews
 
-AgentNews is a personal AI news digest agent. The repository currently includes
-the Python project baseline, SQLite migrations, Markdown report storage, and a
-minimal command-line entry point; agent, search, report generation, API, and
-email features are not implemented yet.
+AgentNews is a personal AI news digest agent. The repository includes the
+Python project baseline, SQLite migrations, local file tools, a Tavily MCP
+search adapter, Markdown report storage, and a minimal command-line entry point.
+Agent orchestration, report generation, API, and email features are not
+implemented yet.
 
 ## Requirements
 
@@ -20,7 +21,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 Edit `.env` in the project directory. Fill in `DEEPSEEK_API_KEY` and
 `DEEPSEEK_MODEL` when enabling DeepSeek. `DEEPSEEK_TIMEOUT` (seconds, default
 30) and `DEEPSEEK_MAX_RETRIES` (default 2, maximum 10) control model requests.
-Search and email credentials can stay empty until those integrations are used.
+The Tavily search URL is preconfigured in `.env.example`; add a Tavily API key
+when enabling online search. Search timeout defaults to 20 seconds. Email
+credentials can stay empty until that integration is used.
 The local defaults are `APP_TIMEZONE=Asia/Shanghai`, `REPORT_ROOT=data/reports`,
 and `SQLITE_PATH=data/agentnews.sqlite3`.
 
@@ -33,8 +36,10 @@ Never commit `.env` or paste credentials into chat; `.env` is ignored by Git.
 
 1. 若项目目录中还没有 `.env`，执行 `Copy-Item .env.example .env`；已有 `.env` 时不要覆盖，直接执行 `notepad .env` 并补齐需要的配置项。
 2. 启用 DeepSeek 时填写 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_MODEL`；超时和重试次数可通过 `DEEPSEEK_TIMEOUT`、`DEEPSEEK_MAX_RETRIES` 调整。
-3. 启用在线搜索时填写 `MCP_SEARCH_SERVER_URL`；是否填写
-   `MCP_SEARCH_API_KEY` 取决于所选 MCP 服务。
+3. 在 [Tavily 官网](https://app.tavily.com/home) 注册并创建 API key，然后填写
+   `MCP_SEARCH_API_KEY`。`MCP_SEARCH_SERVER_URL` 默认是 Tavily 官方托管 MCP
+   endpoint `https://mcp.tavily.com/mcp`，只有使用其他兼容服务时才需要改；
+   `MCP_SEARCH_TIMEOUT` 默认为 20 秒。不要把 key 放入 URL、代码或聊天。
 4. 启用邮件时填写 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、
    `SMTP_PASSWORD` 和 `SMTP_FROM`。默认端口为 `587`。
 5. `APP_TIMEZONE`、`REPORT_ROOT` 和 `SQLITE_PATH` 可先保留示例默认值。
@@ -67,6 +72,7 @@ uv run pytest
 ## Project layout
 
 - `src/agentnews/agent/models/`: LangChain model integrations.
+- `src/agentnews/tools/tavily_mcp.py`: async Tavily MCP search adapter.
 - `src/agentnews/repositories/`: report file storage and persistence adapters.
 - `src/agentnews/tools/` and `src/agentnews/db/`: local tools and SQLite infrastructure.
 - `src/agentnews/main.py`: command-line entry point; `config.py` loads settings.

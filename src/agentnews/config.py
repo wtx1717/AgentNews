@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     deepseek_max_retries: int = Field(default=2, ge=0, le=10)
     mcp_search_server_url: AnyHttpUrl | None = None
     mcp_search_api_key: SecretStr | None = None
+    mcp_search_timeout: float = Field(default=20.0, gt=0)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_user: str | None = None
@@ -67,13 +68,20 @@ class Settings(BaseSettings):
         assert self.deepseek_api_key is not None and self.deepseek_model is not None
         return self.deepseek_api_key, self.deepseek_model
 
-    def require_search(self) -> str:
+    def require_search(self) -> tuple[str, SecretStr]:
         self._raise_if_missing(
             "MCP search",
-            [] if self.mcp_search_server_url is not None else ["MCP_SEARCH_SERVER_URL"],
+            [
+                name
+                for name, value in (
+                    ("MCP_SEARCH_SERVER_URL", self.mcp_search_server_url),
+                    ("MCP_SEARCH_API_KEY", self.mcp_search_api_key),
+                )
+                if value is None
+            ],
         )
-        assert self.mcp_search_server_url is not None
-        return str(self.mcp_search_server_url)
+        assert self.mcp_search_server_url is not None and self.mcp_search_api_key is not None
+        return str(self.mcp_search_server_url), self.mcp_search_api_key
 
     def require_smtp(self) -> tuple[str, int, str, SecretStr, str]:
         fields = (

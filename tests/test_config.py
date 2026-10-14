@@ -14,6 +14,7 @@ def test_local_defaults_load_without_service_credentials():
     assert settings.deepseek_api_key is None
     assert settings.deepseek_timeout == 30
     assert settings.deepseek_max_retries == 2
+    assert settings.mcp_search_timeout == 20
 
 
 def test_environment_values_override_dotenv(tmp_path, monkeypatch):
@@ -65,10 +66,20 @@ def test_require_deepseek_reports_missing_names_only():
         settings.require_deepseek()
 
 
-def test_require_search_reports_missing_url():
+def test_require_search_reports_missing_url_and_api_key():
     settings = Settings(_env_file=None)
 
-    with pytest.raises(ValueError, match="MCP_SEARCH_SERVER_URL"):
+    with pytest.raises(ValueError, match="MCP_SEARCH_SERVER_URL, MCP_SEARCH_API_KEY"):
+        settings.require_search()
+
+
+def test_require_search_reports_missing_api_key_when_url_is_configured():
+    settings = Settings(
+        _env_file=None,
+        mcp_search_server_url="https://mcp.tavily.com/mcp",
+    )
+
+    with pytest.raises(ValueError, match="MCP_SEARCH_API_KEY"):
         settings.require_search()
 
 
@@ -105,12 +116,19 @@ def test_invalid_search_url_is_rejected():
         Settings(_env_file=None, mcp_search_server_url="not-a-url")
 
 
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_invalid_search_timeout_is_rejected(timeout):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, mcp_search_timeout=timeout)
+
+
 def test_service_configurations_return_validated_values():
     settings = Settings(
         _env_file=None,
         deepseek_api_key="deepseek-secret",
         deepseek_model="deepseek-chat",
         mcp_search_server_url="https://search.example/mcp",
+        mcp_search_api_key="search-secret",
         smtp_host="smtp.example.com",
         smtp_user="user",
         smtp_password="smtp-secret",
@@ -120,7 +138,9 @@ def test_service_configurations_return_validated_values():
     key, model = settings.require_deepseek()
     assert key.get_secret_value() == "deepseek-secret"
     assert model == "deepseek-chat"
-    assert settings.require_search() == "https://search.example/mcp"
+    search_url, search_key = settings.require_search()
+    assert search_url == "https://search.example/mcp"
+    assert search_key.get_secret_value() == "search-secret"
     host, port, user, password, sender = settings.require_smtp()
     assert (host, port, user, sender) == ("smtp.example.com", 587, "user", "agent@example.com")
     assert password.get_secret_value() == "smtp-secret"
