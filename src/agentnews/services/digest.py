@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 import json
@@ -13,6 +13,7 @@ from ..agent import AgentRunResult, AgentRunner, ToolCallRecord, create_agent_ru
 from ..config import Settings, get_settings
 from ..repositories import (
     ReportConflictError,
+    RepositoryProtocol,
     ReportStorage,
     SourceArchiveStorage,
     StoredReport,
@@ -99,18 +100,18 @@ class DigestService:
         self,
         agent_runner: AgentRunner | Any | None = None,
         *,
+        repository: RepositoryProtocol,
         settings: Settings | None = None,
         report_storage: ReportStorage | None = None,
         source_archive_storage: SourceArchiveStorage | None = None,
-        report_id_factory: Callable[[], int] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.agent_runner = agent_runner or create_agent_runner(settings=self.settings)
+        self.repository = repository
         self.report_storage = report_storage or ReportStorage(self.settings.report_root)
         self.source_archive_storage = source_archive_storage or SourceArchiveStorage(
             self.settings.source_archive_root
         )
-        self.report_id_factory = report_id_factory or _default_report_id
 
     async def run_once(
         self,
@@ -150,11 +151,10 @@ class DigestService:
         if not sources:
             raise DigestNoSourcesError("没有可靠来源，无法生成日报")
 
-        report_id = self.report_id_factory()
-        if isinstance(report_id, bool) or not isinstance(report_id, int) or report_id < 1:
-            raise DigestConfigurationError("报告 ID 生成器必须返回正整数")
         report_content = _render_report(final_text, sources)
         title = f"{business_date.isoformat()} 新闻日报"
+        reservation = self.repository.reserve_report(business_date, title)
+        report_id = reservation.id
         stored_report = None
         stored_sources = []
         try:
@@ -163,26 +163,44 @@ class DigestService:
             )
             archive_paths: list[str] = []
             for index, source in enumerate(sources, start=1):
-                if source.body is None:
-                    continue
-                stored_source = self.source_archive_storage.save_source(
+                archive_path = None
+                if source.body is not None:
+                    stored_source = self.source_archive_storage.save_source(
+                        report_id,
+                        index,
+                        business_date,
+                        source.title,
+                        source.url,
+                        source.source_site,
+                        _normalise_fetched_at(source.fetched_at),
+                        source.published_at,
+                        source.body,
+                    )
+                    stored_sources.append(stored_source)
+                    archive_path = stored_source.relative_path
+                    archive_paths.append(archive_path)
+                self.repository.add_report_source(
                     report_id,
-                    index,
-                    business_date,
-                    source.title,
-                    source.url,
-                    source.source_site,
-                    _normalise_fetched_at(source.fetched_at),
-                    source.published_at,
-                    source.body,
+                    title=source.title,
+                    url=source.url,
+                    source_name=source.source_site,
+                    published_at=source.published_at,
+                    snippet=source.snippet,
+                    archive_file_path=archive_path,
                 )
-                stored_sources.append(stored_source)
-                archive_paths.append(stored_source.relative_path)
+            self.repository.finalize_report(
+                report_id,
+                file_path=stored_report.relative_path,
+                summary=_report_summary(final_text),
+                content_hash=stored_report.content_hash,
+            )
         except ReportConflictError as error:
             _rollback_created_files(self, stored_report, stored_sources)
+            _cancel_report(self.repository, report_id)
             raise DigestStorageError("日报或来源归档文件已存在且内容不同，未覆盖原文件") from error
-        except (OSError, UnicodeError, ValueError) as error:
+        except Exception as error:
             _rollback_created_files(self, stored_report, stored_sources)
+            _cancel_report(self.repository, report_id)
             raise DigestStorageError("日报或来源归档保存失败") from error
 
         return DigestResult(
@@ -254,10 +272,6 @@ def _render_task_context(preferences: DigestPreferences, business_date: date) ->
     )
 
 
-def _default_report_id() -> int:
-    return max(1, int(datetime.now(UTC).timestamp() * 1_000_000))
-
-
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -281,6 +295,18 @@ def _render_report(text: str, sources: Sequence[_SourceEvidence]) -> str:
         safe_title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
         lines.append(f"- [{safe_title}](<{source.url}>)")
     return "\n".join(lines) + "\n"
+
+
+def _report_summary(text: str) -> str:
+    paragraphs = [" ".join(part.split()) for part in text.split("\n\n") if part.strip()]
+    return paragraphs[0][:300] if paragraphs else ""
+
+
+def _cancel_report(repository: RepositoryProtocol, report_id: int) -> None:
+    try:
+        repository.cancel_report(report_id)
+    except Exception:
+        pass
 
 
 def _extract_sources(records: Sequence[ToolCallRecord]) -> list[_SourceEvidence]:

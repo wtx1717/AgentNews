@@ -8,7 +8,7 @@ import pytest
 
 from agentnews.agent import AgentRunResult, ToolCallRecord
 from agentnews.config import Settings
-from agentnews.repositories import ReportStorage, SourceArchiveStorage
+from agentnews.repositories import InMemoryRepository, ReportStorage, SourceArchiveStorage
 from agentnews.services.digest import (
     DigestConfigurationError,
     DigestEmptyResponseError,
@@ -28,6 +28,10 @@ class FakeRunner:
     async def ainvoke(self, prompt, *, system_prompt=None, task_context=None):
         self.calls.append((prompt, system_prompt, task_context))
         return self.result
+
+
+def _repository():
+    return InMemoryRepository(report_id_factory=lambda: 1)
 
 
 def _settings(tmp_path):
@@ -63,17 +67,18 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
         ),
     )
     runner = FakeRunner(result)
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 7)
+    repository = _repository()
+    service = DigestService(runner, settings=_settings(tmp_path), repository=repository)
 
     digest = asyncio.run(service.run_once(
         DigestPreferences(topics=["人工智能"], keywords=["Agent"], timezone="Asia/Shanghai"),
         date(2026, 10, 14),
     ))
 
-    assert digest.report_id == 7
+    assert digest.report_id == 1
     assert digest.tool_calls == 2
     assert digest.final_text == "日报正文"
-    assert digest.report_path == "2026-10-14/7-2026-10-14-新闻日报.md"
+    assert digest.report_path == "2026-10-14/1-2026-10-14-新闻日报.md"
     assert len(digest.source_archive_paths) == 1
     assert "https://example.com/news" in ReportStorage(tmp_path / "reports").read_report(digest.report_path)
     archive = SourceArchiveStorage(tmp_path / "source_archive").read_source(digest.source_archive_paths[0])
@@ -82,6 +87,13 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
     assert "正文内容" in archive
     assert "摘要" not in archive
     assert "抓取时间：2026-10-14T01:00:00Z" in archive
+    report = repository.get_report(digest.report_id)
+    assert report.file_path == digest.report_path
+    assert report.content_hash
+    assert report.summary == "日报正文"
+    indexed_source = repository.get_report_sources(digest.report_id)[0]
+    assert indexed_source.url == "https://example.com/news"
+    assert indexed_source.archive_file_path == digest.source_archive_paths[0]
     prompt_call, system_prompt, task_context = runner.calls[0]
     assert prompt_call == "请根据本次任务上下文生成一次性新闻日报，并保留真实来源 URL。"
     assert "人工智能" in task_context and "Agent" in task_context
@@ -91,21 +103,25 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
 
 def test_search_summary_can_generate_report_without_archive(tmp_path):
     runner = FakeRunner(_result(_record("web_search", {"results": [{"title": "标题", "url": "https://example.com", "content": "简要摘要"}]}, "1")))
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    repository = _repository()
+    service = DigestService(runner, repository=repository, settings=_settings(tmp_path))
 
     digest = asyncio.run(service.run_once({"topics": ["AI"], "keywords": [], "timezone": "Asia/Shanghai"}, date(2026, 10, 14)))
 
     assert digest.source_archive_paths == ()
     assert (tmp_path / "reports" / digest.report_path).exists()
+    assert repository.get_report_sources(digest.report_id)[0].archive_file_path is None
 
 
 def test_empty_preferences_and_unreliable_sources_fail_before_success(tmp_path):
-    service = DigestService(FakeRunner(_result()), settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(
+        FakeRunner(_result()), repository=_repository(), settings=_settings(tmp_path)
+    )
     with pytest.raises(DigestConfigurationError):
         asyncio.run(service.run_once(DigestPreferences(), date(2026, 10, 14)))
 
     runner = FakeRunner(_result(_record("web_search", {"results": [{"title": "坏链接", "url": "javascript:bad"}]}, "1")))
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
     with pytest.raises(DigestNoSourcesError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
 
@@ -115,11 +131,13 @@ def test_existing_different_report_is_not_overwritten(tmp_path):
     storage = ReportStorage(settings.report_root)
     storage.save_report(1, date(2026, 10, 14), "2026-10-14 新闻日报", "different")
     runner = FakeRunner(_result(_record("web_search", {"url": "https://example.com", "title": "标题", "content": "简要摘要"}, "1")))
-    service = DigestService(runner, settings=settings, report_id_factory=lambda: 1)
+    repository = _repository()
+    service = DigestService(runner, settings=settings, repository=repository)
 
     with pytest.raises(DigestStorageError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
     assert storage.read_report("2026-10-14/1-2026-10-14-新闻日报.md") == "different"
+    assert repository.get_report(1) is None
 
 
 def test_archive_conflict_rolls_back_new_report_and_preserves_archive(tmp_path):
@@ -150,7 +168,8 @@ def test_archive_conflict_rolls_back_new_report_and_preserves_archive(tmp_path):
             ),
         )
     )
-    service = DigestService(runner, settings=settings, report_id_factory=lambda: 1)
+    repository = _repository()
+    service = DigestService(runner, settings=settings, repository=repository)
 
     with pytest.raises(DigestStorageError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
@@ -158,11 +177,12 @@ def test_archive_conflict_rolls_back_new_report_and_preserves_archive(tmp_path):
     report_path = tmp_path / "reports" / "2026-10-14" / "1-2026-10-14-新闻日报.md"
     assert not report_path.exists()
     assert archive_storage.read_source(stored.relative_path).endswith("pre-existing archive")
+    assert repository.get_report(1) is None
 
 
 def test_empty_agent_answer_does_not_write_report(tmp_path):
     runner = FakeRunner(_result(text="  "))
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
 
     with pytest.raises(DigestEmptyResponseError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
@@ -171,7 +191,7 @@ def test_empty_agent_answer_does_not_write_report(tmp_path):
 
 def test_incomplete_agent_run_does_not_write_report(tmp_path):
     runner = FakeRunner(_result(text="工具调用达到上限", stop_reason="max_tool_calls"))
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
 
     with pytest.raises(DigestIncompleteRunError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
@@ -193,7 +213,7 @@ def test_html_fetch_result_is_never_archived(tmp_path):
             ),
         )
     )
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
 
     digest = asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
 
@@ -216,7 +236,7 @@ def test_binary_fetch_result_is_never_archived(tmp_path):
             ),
         )
     )
-    service = DigestService(runner, settings=_settings(tmp_path), report_id_factory=lambda: 1)
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
 
     digest = asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
 
