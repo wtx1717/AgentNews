@@ -3,8 +3,10 @@
 AgentNews is a personal AI news digest agent. The repository includes the
 Python project baseline, SQLite migrations, local file tools, a Tavily MCP
 search adapter, Markdown report storage, and a minimal command-line entry point.
-LangChain Agent tool orchestration is included; report generation, API, and
-email features are not implemented yet.
+LangChain Agent tool orchestration is included. The Agent discovers every tool
+published by the configured MCP service and registers those tools alongside the
+four managed local file tools; it does not register arbitrary shell commands.
+Report generation, API, and email features are not implemented yet.
 
 ## Requirements
 
@@ -74,7 +76,8 @@ uv run pytest
 
 - `src/agentnews/agent/models/`: LangChain model integrations.
 - `src/agentnews/agent/runner.py`: async and sync LangChain tool-calling runner.
-- `src/agentnews/tools/tavily_mcp.py`: async Tavily MCP search adapter.
+- `src/agentnews/tools/mcp_client.py`: async MCP client that discovers and invokes every published service tool.
+- `src/agentnews/tools/tavily_mcp.py`: compatibility adapter for the legacy Tavily search API.
 - `src/agentnews/repositories/`: report file storage and persistence adapters.
 - `src/agentnews/tools/` and `src/agentnews/db/`: local tools and SQLite infrastructure.
 - `src/agentnews/main.py`: command-line entry point; `config.py` loads settings.
