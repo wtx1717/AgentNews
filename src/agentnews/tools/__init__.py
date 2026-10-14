@@ -5,9 +5,14 @@ from .file_tools import (
     DirectoryListing,
     FileReadResult,
     FileToolError,
+    FileWriteResult,
     LocalFileTools,
+    SearchMatch,
+    SearchResult,
     list_dir,
     read_file,
+    search_content,
+    write_file,
 )
 
 __all__ = [
@@ -15,7 +20,12 @@ __all__ = [
     "DirectoryListing",
     "FileReadResult",
     "FileToolError",
+    "FileWriteResult",
     "LocalFileTools",
+    "SearchMatch",
+    "SearchResult",
     "list_dir",
     "read_file",
+    "search_content",
+    "write_file",
 ]
