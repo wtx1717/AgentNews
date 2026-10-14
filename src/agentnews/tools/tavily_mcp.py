@@ -43,7 +43,7 @@ class SearchToolDiscoveryError(SearchError):
 
 
 class SearchToolSchemaError(SearchError):
-    """Raised when the advertised search tool cannot represent a news search."""
+    """Raised when the advertised search tool cannot represent the requested search."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,13 +204,14 @@ def _validate_search_schema(schema: Mapping[str, Any]) -> None:
     if not isinstance(query_schema, Mapping) or not _has_type(query_schema, "string"):
         raise SearchToolSchemaError("Tavily 搜索工具 schema 不支持字符串查询参数")
 
+    has_topic = "topic" in properties
     topic_schema = properties.get("topic")
-    if (
+    if has_topic and (
         not isinstance(topic_schema, Mapping)
         or not _has_type(topic_schema, "string")
-        or not _schema_accepts(topic_schema, "news")
+        or not _schema_accepts(topic_schema, "general")
     ):
-        raise SearchToolSchemaError("Tavily 搜索工具 schema 不支持 topic=news")
+        raise SearchToolSchemaError("Tavily 搜索工具 schema 不支持 topic=general")
 
     limit_key = _select_schema_key(properties, ("max_results", "limit"))
     if limit_key is not None and (
@@ -231,7 +232,9 @@ def _validate_search_schema(schema: Mapping[str, Any]) -> None:
     if "search_depth" in required and not depth_supported:
         raise SearchToolSchemaError("Tavily 搜索工具 schema 要求不兼容的搜索深度")
 
-    supported = {query_key, "topic"}
+    supported = {query_key}
+    if has_topic:
+        supported.add("topic")
     if limit_key is not None:
         supported.add(limit_key)
     if depth_supported:
@@ -254,7 +257,9 @@ def _build_search_arguments(
     if not _schema_accepts(query_schema, query):
         raise SearchToolSchemaError("查询内容不符合 Tavily 工具 schema")
 
-    arguments: dict[str, Any] = {query_key: query, "topic": "news"}
+    arguments: dict[str, Any] = {query_key: query}
+    if "topic" in properties:
+        arguments["topic"] = "general"
     limit_key = _select_schema_key(properties, ("max_results", "limit"))
     if limit_key is not None:
         limit_schema = properties[limit_key]

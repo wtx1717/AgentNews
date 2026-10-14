@@ -38,7 +38,7 @@ def _tool(name="tavily-search", schema=None, *, title=None, description=""):
                 "topic": {"type": "string", "enum": ["general", "news"]},
                 "search_depth": {"type": "string", "enum": ["basic", "advanced"]},
             },
-            "required": ["query", "topic"],
+            "required": ["query"],
         }
     return SimpleNamespace(
         name=name,
@@ -121,7 +121,7 @@ def _response(*, structured_content=None, text=None, is_error=False):
 
 
 @pytest.mark.parametrize("tool_name", ["tavily_search", "search_tavily", "tavilySearch"])
-def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatch, tool_name):
+def test_search_maps_general_arguments_and_normalizes_structured_results(monkeypatch, tool_name):
     state = _harness(
         monkeypatch,
         response=_response(
@@ -156,7 +156,7 @@ def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatc
             {
                 "query": "latest AI news",
                 "max_results": 8,
-                "topic": "news",
+                "topic": "general",
                 "search_depth": "basic",
             },
         )
@@ -178,7 +178,7 @@ def test_search_maps_schema_aliases_and_omits_unsupported_parameters(monkeypatch
         "properties": {
             "q": {"type": "string"},
             "limit": {"type": "integer", "minimum": 5, "maximum": 20},
-            "topic": {"type": "string", "enum": ["news"]},
+            "topic": {"type": "string", "enum": ["general"]},
             "search_depth": {"type": "string", "enum": ["advanced"]},
             "time_range": {"type": "string"},
         },
@@ -196,7 +196,7 @@ def test_search_maps_schema_aliases_and_omits_unsupported_parameters(monkeypatch
 
     asyncio.run(run())
     assert state["calls"] == [
-        ("search_tavily", {"q": "AI news", "limit": 9, "topic": "news"})
+        ("search_tavily", {"q": "AI news", "limit": 9, "topic": "general"})
     ]
 
 
@@ -279,18 +279,82 @@ def test_multiple_search_tools_across_pages_fail_without_calling_tool(monkeypatc
     assert state["http_closed"] is True
 
 
-@pytest.mark.parametrize(
-    "properties",
-    [
-        {"query": {"type": "string"}, "max_results": {"type": "integer"}},
-        {
+def test_general_topic_const_is_supported(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
             "query": {"type": "string"},
             "max_results": {"type": "integer"},
-            "topic": {"type": "string", "enum": ["general"]},
+            "topic": {"type": "string", "const": "general"},
+            "search_depth": {
+                "type": "string",
+                "enum": ["basic", "advanced", "fast", "ultra-fast"],
+            },
+            "include_domains": {"type": "array", "items": {"type": "string"}},
         },
+        "required": ["query"],
+    }
+    state = _harness(
+        monkeypatch,
+        response=_response(structured_content={"results": []}),
+        tool_pages=[_page([_tool("tavily_search", schema)])],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search("AI news", limit=10)
+
+    asyncio.run(run())
+    assert state["calls"] == [
+        (
+            "tavily_search",
+            {
+                "query": "AI news",
+                "max_results": 10,
+                "topic": "general",
+                "search_depth": "basic",
+            },
+        )
+    ]
+
+
+def test_topic_is_omitted_when_schema_does_not_declare_it(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "max_results": {"type": "integer"},
+        },
+        "required": ["query"],
+    }
+    state = _harness(
+        monkeypatch,
+        response=_response(structured_content={"results": []}),
+        tool_pages=[_page([_tool("tavily_search", schema)])],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search("AI news", limit=7)
+
+    asyncio.run(run())
+    assert state["calls"] == [
+        ("tavily_search", {"query": "AI news", "max_results": 7})
+    ]
+
+
+@pytest.mark.parametrize(
+    "topic_schema",
+    [
+        {"type": "string", "const": "news"},
+        {"type": "string", "enum": ["news"]},
     ],
 )
-def test_news_topic_must_be_supported_by_schema(monkeypatch, properties):
+def test_general_topic_must_be_allowed_by_schema(monkeypatch, topic_schema):
+    properties = {
+        "query": {"type": "string"},
+        "topic": topic_schema,
+    }
     state = _harness(
         monkeypatch,
         tool_pages=[
@@ -312,8 +376,9 @@ def test_news_topic_must_be_supported_by_schema(monkeypatch, properties):
         async with TavilyMCPClient(_settings()):
             pass
 
-    with pytest.raises(SearchToolSchemaError, match="topic=news"):
+    with pytest.raises(SearchToolSchemaError, match="topic=general") as exc_info:
         asyncio.run(run())
+    assert "test-api-key" not in str(exc_info.value)
     assert state["calls"] == []
     assert state["client_closed"] is True
     assert state["http_closed"] is True
@@ -331,7 +396,7 @@ def test_query_and_result_count_schema_constraints_are_enforced(monkeypatch):
                             "properties": {
                                 "query": {"type": "string", "minLength": 4},
                                 "max_results": {"type": "integer", "maximum": 6},
-                                "topic": {"type": "string", "enum": ["news"]},
+                                "topic": {"type": "string", "enum": ["general"]},
                             },
                         }
                     )
