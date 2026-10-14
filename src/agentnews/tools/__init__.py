@@ -14,6 +14,13 @@ from .file_tools import (
     search_content,
     write_file,
 )
+from .registry import (
+    ListDirInput,
+    ReadFileInput,
+    SearchContentInput,
+    WriteFileInput,
+    create_local_file_tools,
+)
 
 __all__ = [
     "DirectoryEntry",
@@ -22,8 +29,13 @@ __all__ = [
     "FileToolError",
     "FileWriteResult",
     "LocalFileTools",
+    "ListDirInput",
+    "ReadFileInput",
+    "SearchContentInput",
     "SearchMatch",
     "SearchResult",
+    "WriteFileInput",
+    "create_local_file_tools",
     "list_dir",
     "read_file",
     "search_content",

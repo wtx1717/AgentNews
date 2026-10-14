@@ -7,7 +7,11 @@ authors = [
     { name = "dog", email = "13100162717@163.com" }
 ]
 requires-python = ">=3.14"
-dependencies = ["pydantic-settings>=2.10,<3", "tzdata>=2025.2"]
+dependencies = [
+    "langchain-core>=1.0,<2",
+    "pydantic-settings>=2.10,<3",
+    "tzdata>=2025.2",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.3"]
