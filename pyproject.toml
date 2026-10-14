@@ -7,13 +7,21 @@ authors = [
     { name = "dog", email = "13100162717@163.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "httpx2>=2.13,<3",
+    "jsonschema>=4.26,<5",
+    "langchain-core>=1.0,<2",
+    "langchain-openai>=1.0,<2",
+    "mcp>=2.3,<3",
+    "pydantic-settings>=2.10,<3",
+    "tzdata>=2025.2",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.3"]
 
 [project.scripts]
-agentnews = "agentnews:main"
+agentnews = "agentnews.main:main"
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
