@@ -9,6 +9,8 @@ from agentnews.config import Settings
 from agentnews.tools import (
     OnlineSearchResult,
     SearchConfigurationError,
+    SearchToolDiscoveryError,
+    SearchToolSchemaError,
     SearchTimeoutError,
     SearchUnavailableError,
     TavilyMCPClient,
@@ -26,8 +28,41 @@ def _settings(**overrides):
     return Settings(_env_file=None, **values)
 
 
-def _harness(monkeypatch, *, response=None, failure=None, enter_failure=None):
-    state = {"http_closed": False, "client_closed": False, "calls": []}
+def _tool(name="tavily-search", schema=None, *, title=None, description=""):
+    if schema is None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 5, "maximum": 20},
+                "topic": {"type": "string", "enum": ["general", "news"]},
+                "search_depth": {"type": "string", "enum": ["basic", "advanced"]},
+            },
+            "required": ["query", "topic"],
+        }
+    return SimpleNamespace(
+        name=name,
+        title=title,
+        description=description,
+        input_schema=schema,
+    )
+
+
+def _page(tools, next_cursor=None):
+    return SimpleNamespace(tools=tools, next_cursor=next_cursor)
+
+
+def _harness(
+    monkeypatch,
+    *,
+    response=None,
+    failure=None,
+    list_failure=None,
+    enter_failure=None,
+    tool_pages=None,
+):
+    state = {"http_closed": False, "client_closed": False, "calls": [], "list_calls": []}
+    pages = tool_pages or [_page([_tool()])]
 
     class FakeHTTPClient:
         def __init__(self, *, headers, timeout):
@@ -52,6 +87,13 @@ def _harness(monkeypatch, *, response=None, failure=None, enter_failure=None):
 
         async def __aexit__(self, *_):
             state["client_closed"] = True
+
+        async def list_tools(self, *, cursor=None):
+            state["list_calls"].append(cursor)
+            if list_failure:
+                raise list_failure
+            index = 0 if cursor is None else int(cursor)
+            return pages[index]
 
         async def call_tool(self, name, arguments):
             state["calls"].append((name, arguments))
@@ -78,7 +120,8 @@ def _response(*, structured_content=None, text=None, is_error=False):
     )
 
 
-def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatch):
+@pytest.mark.parametrize("tool_name", ["tavily_search", "search_tavily", "tavilySearch"])
+def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatch, tool_name):
     state = _harness(
         monkeypatch,
         response=_response(
@@ -93,6 +136,7 @@ def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatc
                 ]
             }
         ),
+        tool_pages=[_page([_tool(tool_name)])],
     )
 
     async def run():
@@ -108,7 +152,7 @@ def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatc
     assert state["read_timeout_seconds"] == 2
     assert state["calls"] == [
         (
-            "tavily-search",
+            tool_name,
             {
                 "query": "latest AI news",
                 "max_results": 8,
@@ -126,6 +170,184 @@ def test_search_maps_news_arguments_and_normalizes_structured_results(monkeypatc
     assert results[0].searched_at.tzinfo is not None
     assert state["client_closed"] is True
     assert state["http_closed"] is True
+
+
+def test_search_maps_schema_aliases_and_omits_unsupported_parameters(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
+            "q": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 5, "maximum": 20},
+            "topic": {"type": "string", "enum": ["news"]},
+            "search_depth": {"type": "string", "enum": ["advanced"]},
+            "time_range": {"type": "string"},
+        },
+        "required": ["q", "topic"],
+    }
+    state = _harness(
+        monkeypatch,
+        response=_response(structured_content={"results": []}),
+        tool_pages=[_page([_tool("search_tavily", schema)])],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search("AI news", limit=9)
+
+    asyncio.run(run())
+    assert state["calls"] == [
+        ("search_tavily", {"q": "AI news", "limit": 9, "topic": "news"})
+    ]
+
+
+def test_search_discovers_tool_from_later_page(monkeypatch):
+    state = _harness(
+        monkeypatch,
+        response=_response(structured_content={"results": []}),
+        tool_pages=[
+            _page([_tool("tavily_extract", description="Extract page content")], "1"),
+            _page([_tool("search_tavily")]),
+        ],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search("news")
+
+    asyncio.run(run())
+    assert state["list_calls"] == [None, "1"]
+    assert state["calls"][0][0] == "search_tavily"
+
+
+def test_search_discovery_accepts_explicit_description_metadata(monkeypatch):
+    state = _harness(
+        monkeypatch,
+        response=_response(structured_content={"results": []}),
+        tool_pages=[_page([_tool("tavily", description="Tavily Search")])],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search("news")
+
+    asyncio.run(run())
+    assert state["calls"][0][0] == "tavily"
+
+
+def test_missing_search_tool_fails_without_calling_tool(monkeypatch):
+    state = _harness(
+        monkeypatch,
+        tool_pages=[
+            _page(
+                [
+                    _tool("tavily_extract", description="Extract page content"),
+                    _tool("web_search", description="Search the web"),
+                ]
+            )
+        ],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()):
+            pass
+
+    with pytest.raises(SearchToolDiscoveryError, match="候选数：0"):
+        asyncio.run(run())
+    assert state["calls"] == []
+    assert state["client_closed"] is True
+    assert state["http_closed"] is True
+
+
+def test_multiple_search_tools_across_pages_fail_without_calling_tool(monkeypatch):
+    state = _harness(
+        monkeypatch,
+        tool_pages=[
+            _page([_tool("tavily_search")], "1"),
+            _page([_tool("search_tavily")]),
+        ],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()):
+            pass
+
+    with pytest.raises(SearchToolDiscoveryError, match="候选数：2"):
+        asyncio.run(run())
+    assert state["list_calls"] == [None, "1"]
+    assert state["calls"] == []
+    assert state["client_closed"] is True
+    assert state["http_closed"] is True
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"query": {"type": "string"}, "max_results": {"type": "integer"}},
+        {
+            "query": {"type": "string"},
+            "max_results": {"type": "integer"},
+            "topic": {"type": "string", "enum": ["general"]},
+        },
+    ],
+)
+def test_news_topic_must_be_supported_by_schema(monkeypatch, properties):
+    state = _harness(
+        monkeypatch,
+        tool_pages=[
+            _page(
+                [
+                    _tool(
+                        schema={
+                            "type": "object",
+                            "properties": properties,
+                            "required": ["query"],
+                        }
+                    )
+                ]
+            )
+        ],
+    )
+
+    async def run():
+        async with TavilyMCPClient(_settings()):
+            pass
+
+    with pytest.raises(SearchToolSchemaError, match="topic=news"):
+        asyncio.run(run())
+    assert state["calls"] == []
+    assert state["client_closed"] is True
+    assert state["http_closed"] is True
+
+
+def test_query_and_result_count_schema_constraints_are_enforced(monkeypatch):
+    state = _harness(
+        monkeypatch,
+        tool_pages=[
+            _page(
+                [
+                    _tool(
+                        schema={
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "minLength": 4},
+                                "max_results": {"type": "integer", "maximum": 6},
+                                "topic": {"type": "string", "enum": ["news"]},
+                            },
+                        }
+                    )
+                ]
+            )
+        ],
+    )
+
+    async def run(query, limit):
+        async with TavilyMCPClient(_settings()) as search:
+            await search.search(query, limit)
+
+    for query, limit in (("AI", 5), ("news", 7)):
+        with pytest.raises(SearchToolSchemaError):
+            asyncio.run(run(query, limit))
+    assert state["calls"] == []
 
 
 def test_search_normalizes_tavily_text_results(monkeypatch):
@@ -215,6 +437,22 @@ def test_connection_timeout_closes_http_client_and_maps_error(monkeypatch):
     with pytest.raises(SearchTimeoutError) as exc_info:
         asyncio.run(run())
     assert "slow handshake" not in str(exc_info.value)
+    assert state["http_closed"] is True
+
+
+def test_tool_discovery_timeout_is_mapped_and_closes_connection(monkeypatch):
+    state = _harness(monkeypatch, list_failure=TimeoutError("secret list timeout"))
+
+    async def run():
+        async with TavilyMCPClient(_settings()):
+            pass
+
+    with pytest.raises(SearchTimeoutError) as exc_info:
+        asyncio.run(run())
+    assert "secret list timeout" not in str(exc_info.value)
+    assert "test-api-key" not in str(exc_info.value)
+    assert state["calls"] == []
+    assert state["client_closed"] is True
     assert state["http_closed"] is True
 
 

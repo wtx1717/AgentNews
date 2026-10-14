@@ -24,6 +24,8 @@ from .registry import (
 from .tavily_mcp import (
     OnlineSearchResult,
     SearchConfigurationError,
+    SearchToolDiscoveryError,
+    SearchToolSchemaError,
     SearchError,
     SearchTimeoutError,
     SearchUnavailableError,
@@ -43,6 +45,8 @@ __all__ = [
     "SearchContentInput",
     "SearchConfigurationError",
     "SearchError",
+    "SearchToolDiscoveryError",
+    "SearchToolSchemaError",
     "SearchMatch",
     "SearchResult",
     "SearchTimeoutError",
