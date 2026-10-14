@@ -8,6 +8,17 @@ from .repositories.report_storage import (
     ReportStorage,
     StoredReport,
 )
+from .services.digest import (
+    DigestConfigurationError,
+    DigestEmptyResponseError,
+    DigestError,
+    DigestIncompleteRunError,
+    DigestNoSourcesError,
+    DigestPreferences,
+    DigestResult,
+    DigestService,
+    DigestStorageError,
+)
 
 __all__ = [
     "InvalidReportPathError",
@@ -22,4 +33,13 @@ __all__ = [
     "create_agent_runner",
     "initialize_database",
     "main",
+    "DigestConfigurationError",
+    "DigestEmptyResponseError",
+    "DigestError",
+    "DigestIncompleteRunError",
+    "DigestNoSourcesError",
+    "DigestPreferences",
+    "DigestResult",
+    "DigestService",
+    "DigestStorageError",
 ]

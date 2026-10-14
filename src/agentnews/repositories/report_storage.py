@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import hashlib
 import os
@@ -21,6 +21,7 @@ class InvalidReportPathError(ValueError):
 class StoredReport:
     relative_path: str
     content_hash: str
+    created: bool = field(default=False, compare=False)
 
 
 class ReportStorage:
@@ -60,6 +61,7 @@ class ReportStorage:
             return StoredReport(relative_path, content_hash)
 
         temporary_path: Path | None = None
+        created = False
         try:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -75,13 +77,28 @@ class ReportStorage:
 
             try:
                 os.link(temporary_path, target)
+                created = True
             except FileExistsError:
                 self._check_existing_report(target, content_hash)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
-        return StoredReport(relative_path, content_hash)
+        return StoredReport(relative_path, content_hash, created)
+
+    def discard_created_report(self, report: StoredReport) -> bool:
+        """Remove a report created by this save, but only if its bytes are unchanged."""
+        if not report.created:
+            return False
+        target = self._resolve_report_path(report.relative_path)
+        self._ensure_contained(target)
+        if not target.is_file():
+            return False
+        actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual_hash != report.content_hash:
+            return False
+        target.unlink()
+        return True
 
     def read_report(self, relative_path: str | Path) -> str:
         target = self._resolve_report_path(relative_path)

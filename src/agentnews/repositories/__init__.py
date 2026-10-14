@@ -6,10 +6,18 @@ from .report_storage import (
     ReportStorage,
     StoredReport,
 )
+from .source_archive_storage import (
+    InvalidSourceArchivePathError,
+    SourceArchiveStorage,
+    StoredSourceArchive,
+)
 
 __all__ = [
     "InvalidReportPathError",
     "ReportConflictError",
     "ReportStorage",
     "StoredReport",
+    "InvalidSourceArchivePathError",
+    "SourceArchiveStorage",
+    "StoredSourceArchive",
 ]

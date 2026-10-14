@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     smtp_from: str | None = None
     app_timezone: str = "Asia/Shanghai"
     report_root: Path = Path("data/reports")
+    source_archive_root: Path = Path("data/source_archive")
     sqlite_path: Path = Path("data/agentnews.sqlite3")
 
     @field_validator(
