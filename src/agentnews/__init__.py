@@ -29,6 +29,8 @@ from .services.digest import (
     DigestService,
     DigestStorageError,
 )
+from .services.chat import ChatAgentError, ChatResult, ChatService, ChatSessionNotFoundError
+from .api import app, create_app
 
 __all__ = [
     "InvalidReportPathError",
@@ -60,4 +62,10 @@ __all__ = [
     "DigestResult",
     "DigestService",
     "DigestStorageError",
+    "ChatAgentError",
+    "ChatResult",
+    "ChatService",
+    "ChatSessionNotFoundError",
+    "app",
+    "create_app",
 ]

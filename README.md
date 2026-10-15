@@ -6,7 +6,9 @@ search adapter, Markdown report storage, and a minimal command-line entry point.
 LangChain Agent tool orchestration is included. The Agent discovers every tool
 published by the configured MCP service and registers those tools alongside the
 four managed local file tools; it does not register arbitrary shell commands.
-Report generation, API, and email features are not implemented yet.
+The FastAPI backend exposes chat, settings, one-off digest, report, source,
+and health endpoints. It defaults to an in-memory repository for local API
+development; SQLite business persistence remains a later phase.
 
 ## Requirements
 
@@ -56,6 +58,16 @@ uv run agentnews
 
 The command initializes the SQLite database at `SQLITE_PATH` and applies any
 pending migrations before reporting that the CLI is ready.
+
+To run the local FastAPI API:
+
+```powershell
+uv run uvicorn agentnews.api:app --reload
+```
+
+The API does not require external credentials to start. Chat and digest calls
+return a safe error until the corresponding model or search configuration is
+provided.
 
 ## Report storage
 

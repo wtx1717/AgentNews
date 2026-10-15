@@ -251,6 +251,15 @@ class InMemoryRepository:
                 return ()
             return tuple(self._report_sources.get(report_id, ()))
 
+    def get_source(self, source_id: int) -> ReportSource | None:
+        _require_positive_id(source_id, "source_id")
+        with self._lock:
+            for sources in self._report_sources.values():
+                for source in sources:
+                    if source.id == source_id:
+                        return source
+            return None
+
 
 def _normalize_preferences(value: UserPreferences) -> UserPreferences:
     if not isinstance(value, UserPreferences):
