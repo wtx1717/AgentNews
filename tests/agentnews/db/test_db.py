@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from agentnews.db import connect_database, initialize_database, transaction
-from agentnews.db.migrations import Migration, run_migrations
+from agentnews.db.migrations import MIGRATIONS, Migration, run_migrations
 
 
 EXPECTED_TABLES = {
@@ -27,7 +27,7 @@ def table_names(connection):
 def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
     database_path = tmp_path / "nested" / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1]
+    assert initialize_database(database_path) == [1, 2]
 
     connection = connect_database(database_path)
     try:
@@ -42,9 +42,15 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
             "keywords_json": "[]",
         }
         migration = connection.execute(
-            "SELECT version, name FROM schema_migrations"
+            "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchone()
         assert (migration["version"], migration["name"]) == (1, "initial_schema")
+        assert connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
+        ).fetchone()["version"] == 2
+        assert "archive_file_path" in {
+            row["name"] for row in connection.execute("PRAGMA table_info(report_sources)")
+        }
     finally:
         connection.close()
 
@@ -52,19 +58,185 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
 def test_repeated_initialization_is_idempotent(tmp_path):
     database_path = tmp_path / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1]
+    assert initialize_database(database_path) == [1, 2]
     assert initialize_database(database_path) == []
 
     connection = connect_database(database_path)
     try:
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM schema_migrations"
-        ).fetchone()["count"] == 1
+        ).fetchone()["count"] == 2
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM user_preferences"
         ).fetchone()["count"] == 1
     finally:
         connection.close()
+
+
+def test_migrations_have_contiguous_versions():
+    assert [migration.version for migration in MIGRATIONS] == [1, 2]
+
+
+def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_path):
+    database_path = tmp_path / "archive-column.sqlite3"
+    assert initialize_database(database_path, migrations=MIGRATIONS[:1]) == [1]
+
+    connection = connect_database(database_path)
+    try:
+        connection.execute(
+            "INSERT INTO reports (report_date, title, file_path, content_hash) "
+            "VALUES ('2026-10-14', '日报', 'daily.md', 'hash')"
+        )
+        report_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.execute(
+            "INSERT INTO report_sources (report_id, title, url, source_name) "
+            "VALUES (?, '来源', 'https://example.test', 'Example')",
+            (report_id,),
+        )
+        connection.execute(
+            "ALTER TABLE report_sources ADD COLUMN archive_file_path TEXT"
+        )
+        connection.execute(
+            "UPDATE report_sources SET archive_file_path = ? WHERE report_id = ?",
+            ("2026-10-14/source.md", report_id),
+        )
+    finally:
+        connection.close()
+
+    assert initialize_database(database_path) == [2]
+
+    upgraded = connect_database(database_path)
+    try:
+        columns = [
+            row["name"]
+            for row in upgraded.execute("PRAGMA table_info(report_sources)")
+        ]
+        assert columns.count("archive_file_path") == 1
+        assert [
+            row["version"]
+            for row in upgraded.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ] == [1, 2]
+        source = upgraded.execute(
+            "SELECT report_id, archive_file_path FROM report_sources"
+        ).fetchone()
+        assert dict(source) == {
+            "report_id": report_id,
+            "archive_file_path": "2026-10-14/source.md",
+        }
+    finally:
+        upgraded.close()
+
+
+def test_archive_path_migration_failure_rolls_back_without_losing_source_data(tmp_path):
+    database_path = tmp_path / "archive-failure.sqlite3"
+    assert initialize_database(database_path, migrations=MIGRATIONS[:1]) == [1]
+
+    connection = connect_database(database_path)
+    try:
+        connection.execute(
+            "INSERT INTO reports (report_date, title, file_path, content_hash) "
+            "VALUES ('2026-10-14', '日报', 'daily.md', 'hash')"
+        )
+        report_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.execute(
+            "INSERT INTO report_sources (report_id, title, url, source_name) "
+            "VALUES (?, '来源', 'https://example.test', 'Example')",
+            (report_id,),
+        )
+
+        def failing_archive_migration(connection):
+            connection.execute(
+                "ALTER TABLE report_sources ADD COLUMN archive_file_path TEXT"
+            )
+            raise RuntimeError("archive migration failed")
+
+        failing_migrations = (
+            MIGRATIONS[0],
+            Migration(2, "failing_archive_path", failing_archive_migration),
+        )
+        with pytest.raises(RuntimeError, match="archive migration failed"):
+            run_migrations(connection, failing_migrations)
+
+        columns = [
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(report_sources)")
+        ]
+        assert "archive_file_path" not in columns
+        assert [
+            row["version"]
+            for row in connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ] == [1]
+        assert connection.execute(
+            "SELECT title FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()["title"] == "日报"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM report_sources WHERE report_id = ?", (report_id,)
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_v1_database_upgrades_without_losing_rows(tmp_path):
+    database_path = tmp_path / "v1.sqlite3"
+    connection = connect_database(database_path)
+    try:
+        connection.execute(
+            "CREATE TABLE schema_migrations ("
+            "version INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+            "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE user_preferences ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), display_name TEXT, email TEXT, "
+            "timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai', topics_json TEXT NOT NULL DEFAULT '[]', "
+            "keywords_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute("INSERT INTO user_preferences (id, display_name) VALUES (1, '保留')")
+        connection.execute(
+            "CREATE TABLE reports (id INTEGER PRIMARY KEY, report_date TEXT NOT NULL, "
+            "title TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE, summary TEXT NOT NULL DEFAULT '', "
+            "content_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE report_sources (id INTEGER PRIMARY KEY, report_id INTEGER NOT NULL, "
+            "title TEXT NOT NULL, url TEXT NOT NULL, source_name TEXT NOT NULL, published_at TEXT, "
+            "snippet TEXT NOT NULL DEFAULT '', FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE)"
+        )
+        connection.execute(
+            "INSERT INTO reports (id, report_date, title, file_path, content_hash) "
+            "VALUES (7, '2026-10-14', '日报', 'daily.md', 'hash')"
+        )
+        connection.execute(
+            "INSERT INTO report_sources (report_id, title, url, source_name) "
+            "VALUES (7, '来源', 'https://example.test', 'Example')"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (1, 'initial_schema')"
+        )
+    finally:
+        connection.close()
+
+    assert initialize_database(database_path) == [2]
+    upgraded = connect_database(database_path)
+    try:
+        assert upgraded.execute(
+            "SELECT display_name FROM user_preferences WHERE id = 1"
+        ).fetchone()["display_name"] == "保留"
+        assert upgraded.execute("SELECT title FROM reports WHERE id = 7").fetchone()["title"] == "日报"
+        assert upgraded.execute(
+            "SELECT COUNT(*) AS count FROM report_sources WHERE report_id = 7"
+        ).fetchone()["count"] == 1
+        assert "archive_file_path" in {
+            row["name"] for row in upgraded.execute("PRAGMA table_info(report_sources)")
+        }
+    finally:
+        upgraded.close()
 
 
 def test_transaction_rolls_back_data_on_exception(tmp_path):

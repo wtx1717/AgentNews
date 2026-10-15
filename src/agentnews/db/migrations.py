@@ -118,8 +118,24 @@ def _initial_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _add_report_source_archive_path(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(report_sources)").fetchall()
+    }
+    if "archive_file_path" not in columns:
+        connection.execute(
+            "ALTER TABLE report_sources ADD COLUMN archive_file_path TEXT"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
+    Migration(
+        version=2,
+        name="report_source_archive_path",
+        apply=_add_report_source_archive_path,
+    ),
 )
 
 

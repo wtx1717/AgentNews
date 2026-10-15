@@ -1,6 +1,7 @@
 """Persistence adapters for reports and other application data."""
 
 from .memory import InMemoryRepository
+from .sqlite import SQLiteRepository
 from .protocol import (
     ChatMessage,
     ChatSession,
@@ -27,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "ChatSession",
     "InMemoryRepository",
+    "SQLiteRepository",
     "InvalidReportPathError",
     "ReportConflictError",
     "ReportRecord",

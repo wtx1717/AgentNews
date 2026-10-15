@@ -9,6 +9,7 @@ from agentnews.repositories.report_storage import (
     ReportConflictError,
     ReportStorage,
 )
+from agentnews.repositories.source_archive_storage import SourceArchiveStorage
 
 
 def test_report_storage_is_reexported_from_package_root():
@@ -54,6 +55,32 @@ def test_same_report_path_with_different_content_is_not_overwritten(tmp_path):
         storage.save_report(1, report_date, "Daily News", "replacement")
 
     assert storage.read_report(stored.relative_path) == "original"
+
+
+def test_same_source_archive_and_content_is_idempotent_without_rewriting(tmp_path):
+    storage = SourceArchiveStorage(tmp_path / "source_archive")
+    source_date = date(2026, 10, 13)
+    arguments = (
+        1,
+        1,
+        source_date,
+        "Source",
+        "https://example.com/news",
+        "example.com",
+        "2026-10-13T00:00:00Z",
+        None,
+        "same source content",
+    )
+
+    first = storage.save_source(*arguments)
+    source_file = storage.root / first.relative_path
+    original_bytes = source_file.read_bytes()
+    original_mtime = source_file.stat().st_mtime_ns
+    second = storage.save_source(*arguments)
+
+    assert second == first
+    assert source_file.read_bytes() == original_bytes
+    assert source_file.stat().st_mtime_ns == original_mtime
 
 
 def test_equal_content_for_different_reports_has_distinct_paths(tmp_path):

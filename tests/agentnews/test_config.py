@@ -14,7 +14,7 @@ def test_local_defaults_load_without_service_credentials():
     assert settings.deepseek_api_key is None
     assert settings.deepseek_timeout == 30
     assert settings.deepseek_max_retries == 2
-    assert settings.agent_max_tool_calls == 8
+    assert settings.agent_max_tool_calls == 16
     assert settings.mcp_search_timeout == 20
 
 
