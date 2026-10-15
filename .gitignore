@@ -19,4 +19,5 @@ data/*
 # env
 .env
 
-DEVELOPMENT_PLAN.md
+DEVELOPMENT_PLAN.v1.md
+DEVELOPMENT_PLAN.v2.md

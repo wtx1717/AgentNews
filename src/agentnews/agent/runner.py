@@ -9,7 +9,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -26,9 +26,20 @@ from ..tools import (
 )
 from ..tools.path_security import ManagedPathResolver
 from .models.deepseek import create_deepseek_model, map_deepseek_error
+from .prompt_catalog import get_prompt
 
 
 StopReason = Literal["completed", "max_tool_calls"]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRecord:
+    """One model-requested tool call and the result returned to the model."""
+
+    name: str
+    arguments: Mapping[str, Any] | None
+    result: str
+    call_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +49,7 @@ class AgentRunResult:
     text: str
     tool_calls: int
     stop_reason: StopReason
+    tool_call_records: tuple[ToolCallRecord, ...] = ()
 
 
 class ToolRegistrationError(RuntimeError):
@@ -70,10 +82,30 @@ class AgentRunner:
         self.mcp_client_factory = mcp_client_factory or MCPClient
         self.search_client_factory = search_client_factory
 
-    async def ainvoke(self, prompt: str) -> AgentRunResult:
-        """Execute one prompt and its model-selected tools asynchronously."""
+    async def ainvoke(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        task_context: str | None = None,
+    ) -> AgentRunResult:
+        """Execute one prompt and its model-selected tools asynchronously.
+
+        ``prompt`` remains the user request. ``system_prompt`` and
+        ``task_context`` are separate model messages so task-specific data is
+        never silently mixed into an ordinary user request.
+        """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        if system_prompt is not None and (
+            not isinstance(system_prompt, str) or not system_prompt.strip()
+        ):
+            raise ValueError("system_prompt must not be empty")
+        if task_context is not None and not isinstance(task_context, str):
+            raise TypeError("task_context must be a string or None")
+
+        resolved_system_prompt = system_prompt or get_prompt("interaction")
+        normalized_context = task_context.strip() if task_context else ""
 
         stack = AsyncExitStack()
         try:
@@ -167,10 +199,14 @@ class AgentRunner:
             except Exception:
                 raise ToolRegistrationError("工具定义无法绑定到模型") from None
 
-            messages: list[Any] = [HumanMessage(content=prompt.strip())]
+            messages: list[Any] = [SystemMessage(content=resolved_system_prompt)]
+            if normalized_context:
+                messages.append(SystemMessage(content=normalized_context))
+            messages.append(HumanMessage(content=prompt.strip()))
             executed = 0
             last_response: Any | None = None
             tool_results: list[str] = []
+            tool_call_records: list[ToolCallRecord] = []
             while True:
                 try:
                     response = await bound_model.ainvoke(messages)
@@ -183,6 +219,7 @@ class AgentRunner:
                         text=_message_text(response),
                         tool_calls=executed,
                         stop_reason="completed",
+                        tool_call_records=tuple(tool_call_records),
                     )
 
                 if executed >= self.settings.agent_max_tool_calls:
@@ -190,6 +227,7 @@ class AgentRunner:
                         text=_limit_text(response, executed, tool_results),
                         tool_calls=executed,
                         stop_reason="max_tool_calls",
+                        tool_call_records=tuple(tool_call_records),
                     )
 
                 messages.append(response)
@@ -199,12 +237,21 @@ class AgentRunner:
                             text=_limit_text(last_response, executed, tool_results),
                             tool_calls=executed,
                             stop_reason="max_tool_calls",
+                            tool_call_records=tuple(tool_call_records),
                         )
                     name = _field(call, "name")
                     call_id = _field(call, "id") or f"tool-call-{executed + 1}"
                     arguments = _field(call, "args")
                     content = await _invoke_tool(tool_map, name, arguments)
                     tool_results.append(content)
+                    tool_call_records.append(
+                        ToolCallRecord(
+                            name=str(name) if isinstance(name, str) else "",
+                            arguments=dict(arguments) if isinstance(arguments, Mapping) else None,
+                            result=content,
+                            call_id=str(call_id),
+                        )
+                    )
                     messages.append(
                         ToolMessage(
                             content=content,
@@ -219,6 +266,7 @@ class AgentRunner:
                         text=_limit_text(last_response, executed, tool_results),
                         tool_calls=executed,
                         stop_reason="max_tool_calls",
+                        tool_call_records=tuple(tool_call_records),
                     )
         finally:
             try:
@@ -226,12 +274,24 @@ class AgentRunner:
             except Exception:
                 pass
 
-    def invoke(self, prompt: str) -> AgentRunResult:
+    def invoke(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        task_context: str | None = None,
+    ) -> AgentRunResult:
         """Synchronous convenience wrapper around :meth:`ainvoke`."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.ainvoke(prompt))
+            return asyncio.run(
+                self.ainvoke(
+                    prompt,
+                    system_prompt=system_prompt,
+                    task_context=task_context,
+                )
+            )
         raise RuntimeError("AgentRunner.invoke cannot run inside an active event loop; use ainvoke")
 
 

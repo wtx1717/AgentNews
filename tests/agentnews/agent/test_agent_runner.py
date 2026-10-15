@@ -5,9 +5,9 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agentnews.agent import AgentRunner
+from agentnews.agent import AgentRunner, get_prompt
 from agentnews.config import Settings
 from agentnews.tools.path_security import ManagedPathResolver
 from agentnews.tools import OnlineSearchResult
@@ -50,7 +50,11 @@ def test_direct_answer_does_not_initialize_search(monkeypatch):
     assert result.text == "直接回答"
     assert result.tool_calls == 0
     assert result.stop_reason == "completed"
-    assert isinstance(model.messages[0][0], HumanMessage)
+    assert isinstance(model.messages[0][0], SystemMessage)
+    assert model.messages[0][0].content == get_prompt("interaction")
+    assert isinstance(model.messages[0][1], HumanMessage)
+    assert model.messages[0][1].content == "hello"
+    assert result.tool_call_records == ()
     assert {tool.name for tool in model.tools} == {
         "web_search", "list_dir", "read_file", "search_content", "write_file"
     }
@@ -112,6 +116,45 @@ def test_multiple_tools_run_in_order_and_results_are_replayed(tmp_path):
     assert [message.name for message in replayed if isinstance(message, ToolMessage)] == [
         "list_dir", "search_content"
     ]
+    assert [record.call_id for record in result.tool_call_records] == ["call-1", "call-2"]
+    assert [record.name for record in result.tool_call_records] == ["list_dir", "search_content"]
+    assert result.tool_call_records[0].arguments == {"path": "."}
+    assert json.loads(result.tool_call_records[0].result)["ok"] is True
+    assert result.tool_call_records[1].arguments == {"keyword": "needle", "dir": "."}
+    assert json.loads(result.tool_call_records[1].result)["ok"] is True
+
+
+def test_daily_prompt_and_task_context_are_separate_from_user_request():
+    model = FakeModel([AIMessage(content="日报已生成")])
+    system_prompt = get_prompt("digest_system")
+    task_context = "关注主题：人工智能\n时区：Asia/Shanghai"
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke(
+            "请生成日报",
+            system_prompt=system_prompt,
+            task_context=task_context,
+        )
+    )
+
+    messages = model.messages[0]
+    assert [type(message) for message in messages] == [SystemMessage, SystemMessage, HumanMessage]
+    assert messages[0].content == system_prompt
+    assert messages[1].content == task_context
+    assert messages[2].content == "请生成日报"
+    assert result.text == "日报已生成"
+
+
+def test_empty_task_context_is_not_added_to_ordinary_conversation():
+    model = FakeModel([AIMessage(content="ok")])
+
+    asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke("你好", task_context="  ")
+    )
+
+    messages = model.messages[0]
+    assert [type(message) for message in messages] == [SystemMessage, HumanMessage]
+    assert messages[-1].content == "你好"
 
 
 def test_model_can_request_tools_across_multiple_turns(tmp_path):
@@ -258,6 +301,12 @@ def test_unknown_tool_and_invalid_arguments_are_safe():
     assert result.tool_calls == 2
     errors = [json.loads(message.content)["error"] for message in model.messages[1] if isinstance(message, ToolMessage)]
     assert [error["code"] for error in errors] == ["unknown_tool", "invalid_arguments"]
+    assert [record.call_id for record in result.tool_call_records] == ["call-1", "call-2"]
+    assert [record.name for record in result.tool_call_records] == ["not_registered", "read_file"]
+    assert result.tool_call_records[0].arguments == {}
+    assert json.loads(result.tool_call_records[0].result)["error"]["code"] == "unknown_tool"
+    assert result.tool_call_records[1].arguments == {"unexpected": True}
+    assert json.loads(result.tool_call_records[1].result)["error"]["code"] == "invalid_arguments"
 
 
 def test_tool_call_limit_stops_without_an_extra_model_call(tmp_path):
@@ -284,6 +333,9 @@ def test_tool_call_limit_stops_without_an_extra_model_call(tmp_path):
     )
 
     assert result.tool_calls == 1
+    assert len(result.tool_call_records) == 1
+    assert result.tool_call_records[0].call_id == "call-1"
+    assert result.tool_call_records[0].name == "list_dir"
     assert result.stop_reason == "max_tool_calls"
     assert "工具调用达到上限" in result.text
     assert '"ok":true' in result.text
@@ -304,3 +356,18 @@ def test_sync_invoke_runs_direct_answer():
     runner = AgentRunner(FakeModel([AIMessage(content="同步回答")]), settings=_settings())
 
     assert runner.invoke("hello").text == "同步回答"
+
+
+def test_sync_invoke_forwards_system_prompt_and_task_context():
+    model = FakeModel([AIMessage(content="完成")])
+    runner = AgentRunner(model, settings=_settings())
+
+    runner.invoke("执行日报", system_prompt="日报系统提示词", task_context="日报偏好")
+
+    messages = model.messages[0]
+    assert [type(message) for message in messages] == [SystemMessage, SystemMessage, HumanMessage]
+    assert [message.content for message in messages] == [
+        "日报系统提示词",
+        "日报偏好",
+        "执行日报",
+    ]
