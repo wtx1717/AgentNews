@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from agentnews.agent import AgentRunResult
+from agentnews import api as api_module
 from agentnews.api import create_app
 from agentnews.config import Settings
 from agentnews.repositories import (
@@ -13,7 +15,7 @@ from agentnews.repositories import (
     SourceArchiveStorage,
     UserPreferences,
 )
-from agentnews.services.digest import DigestResult
+from agentnews.services.digest import DigestNoSourcesError, DigestResult
 
 
 class FakeRunner:
@@ -39,6 +41,11 @@ class FakeDigestService:
         return self.result
 
 
+class NoSourcesDigestService:
+    async def run_once(self, preferences, business_date):
+        raise DigestNoSourcesError("没有可靠来源")
+
+
 class RecordingRepository(InMemoryRepository):
     def __init__(self):
         super().__init__()
@@ -53,6 +60,10 @@ class RecordingRepository(InMemoryRepository):
 def _settings(tmp_path):
     return Settings(
         _env_file=None,
+        deepseek_api_key=None,
+        deepseek_model=None,
+        mcp_search_server_url=None,
+        mcp_search_api_key=None,
         report_root=tmp_path / "reports",
         source_archive_root=tmp_path / "source_archive",
     )
@@ -96,6 +107,27 @@ def test_chat_settings_health_and_session_context(tmp_path):
     assert health.status_code == 200
     assert health.json()["dependencies"]["agent"] == "unconfigured"
     assert "API_KEY" not in health.text
+
+
+def test_frontend_and_static_assets_are_served_without_secrets_or_browser_storage(tmp_path):
+    client = TestClient(create_app(settings=_settings(tmp_path), agent_runner=FakeRunner()))
+
+    page = client.get("/")
+    stylesheet = client.get("/static/app.css")
+    script = client.get("/static/app.js")
+
+    assert page.status_code == stylesheet.status_code == script.status_code == 200
+    assert "text/html" in page.headers["content-type"]
+    assert "text/css" in stylesheet.headers["content-type"]
+    assert "javascript" in script.headers["content-type"]
+    assert '/static/app.css' in page.text
+    assert '/static/app.js' in page.text
+
+    static_root = Path(api_module.__file__).parent / "static"
+    frontend_source = "\n".join(path.read_text(encoding="utf-8") for path in static_root.iterdir())
+    lowered_source = frontend_source.lower()
+    for forbidden in ("localstorage", "sessionstorage", "api_key", "smtp", "password", "secret"):
+        assert forbidden not in lowered_source
 
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):
@@ -184,6 +216,33 @@ def test_digest_endpoint_uses_saved_timezone_and_returns_report(tmp_path):
     assert response.json()["report_id"] == 1
     assert digest.calls[0][0].topics == ("AI",)
     assert digest.calls[0][1] == date(2026, 10, 15)
+
+
+def test_digest_without_reliable_sources_returns_no_results_without_indexing(tmp_path):
+    repository = InMemoryRepository()
+    repository.save_preferences(UserPreferences(topics=["AI"], timezone="Asia/Shanghai"))
+    client = TestClient(
+        create_app(
+            repository,
+            digest_service=NoSourcesDigestService(),
+            agent_runner=FakeRunner(),
+            settings=_settings(tmp_path),
+        )
+    )
+
+    response = client.post("/api/digest/run-once")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "report_id": None,
+        "title": None,
+        "report_path": None,
+        "source_count": 0,
+        "source_archive_paths": [],
+        "status": "no_results",
+        "message": "没有可靠来源，未生成日报。",
+    }
+    assert repository.list_reports() == ()
 
 
 def test_validation_and_missing_session_use_unified_errors(tmp_path):

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#172320">
+    <title>AgentNews · 新闻工作台</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="AgentNews 首页">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span>AgentNews</span>
+      </a>
+      <div class="topbar-meta">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span>本地工作区</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="page-heading" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">个人新闻简报</p>
+          <h1 id="page-title">新闻工作台</h1>
+        </div>
+        <time id="today-label" class="today-label"></time>
+      </section>
+
+      <div class="primary-grid">
+        <section class="conversation section-panel" aria-labelledby="chat-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">对话</p>
+              <h2 id="chat-heading">研究助手</h2>
+            </div>
+            <span id="chat-status" class="status status-idle" role="status" aria-live="polite">尚未执行</span>
+          </div>
+          <div id="chat-messages" class="chat-messages" aria-live="polite" aria-relevant="additions">
+            <div class="empty-state chat-empty">开始一段新对话</div>
+          </div>
+          <p id="chat-error" class="error-message" role="alert" hidden></p>
+          <form id="chat-form" class="chat-form">
+            <label class="sr-only" for="chat-input">发送消息</label>
+            <textarea id="chat-input" name="message" rows="2" maxlength="4000" placeholder="输入消息…" required></textarea>
+            <button class="button button-primary send-button" type="submit" aria-label="发送消息" title="发送消息">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+            </button>
+          </form>
+          <div class="chat-footer">
+            <span>工具调用 <strong id="tool-call-count">0</strong></span>
+            <span id="chat-session-label">临时会话</span>
+          </div>
+        </section>
+
+        <section class="preferences section-panel" aria-labelledby="preferences-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">个性化</p>
+              <h2 id="preferences-heading">日报偏好</h2>
+            </div>
+            <span id="preferences-status" class="subtle-status" role="status" aria-live="polite"></span>
+          </div>
+          <form id="preferences-form" class="preferences-form">
+            <div class="field-row">
+              <label class="field">
+                <span>显示名称</span>
+                <input name="display_name" type="text" maxlength="120" autocomplete="name">
+              </label>
+              <label class="field">
+                <span>邮箱</span>
+                <input name="email" type="email" maxlength="254" autocomplete="email">
+              </label>
+            </div>
+            <label class="field">
+              <span>时区</span>
+              <input name="timezone" type="text" value="Asia/Shanghai" spellcheck="false">
+            </label>
+            <label class="field">
+              <span>主题</span>
+              <textarea name="topics" rows="2" placeholder="人工智能, 半导体" maxlength="2000"></textarea>
+            </label>
+            <label class="field">
+              <span>关键词</span>
+              <textarea name="keywords" rows="2" placeholder="Agent&#10;芯片制造" maxlength="2000"></textarea>
+            </label>
+            <div class="form-actions">
+              <p id="preferences-error" class="error-message" role="alert" hidden></p>
+              <button class="button button-secondary" type="submit">保存偏好</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <section class="digest-band" aria-labelledby="digest-heading">
+        <div class="digest-copy">
+          <p class="eyebrow">按需执行</p>
+          <h2 id="digest-heading">一次性日报</h2>
+        </div>
+        <div class="digest-action">
+          <span id="digest-status" class="status status-idle" role="status" aria-live="polite">尚未执行</span>
+          <button id="run-digest" class="button button-accent" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 11.9-3" /></svg>
+            按已保存偏好生成一次日报
+          </button>
+        </div>
+        <p id="digest-message" class="digest-message" aria-live="polite"></p>
+      </section>
+
+      <div class="reports-grid">
+        <section class="report-history section-panel" aria-labelledby="history-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">归档</p>
+              <h2 id="history-heading">历史日报</h2>
+            </div>
+            <button id="refresh-reports" class="icon-button" type="button" aria-label="刷新日报列表" title="刷新日报列表">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 11.9-3" /></svg>
+            </button>
+          </div>
+          <p id="reports-status" class="list-status" role="status" aria-live="polite"></p>
+          <div id="report-list" class="report-list"></div>
+          <button id="load-more" class="button button-quiet load-more" type="button" hidden>加载更多</button>
+        </section>
+
+        <section class="report-detail section-panel" aria-labelledby="detail-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">阅读</p>
+              <h2 id="detail-heading">报告详情</h2>
+            </div>
+          </div>
+          <div id="detail-placeholder" class="empty-state">选择一份日报查看内容</div>
+          <article id="report-detail" hidden>
+            <div class="detail-meta">
+              <time id="detail-date"></time>
+              <span id="detail-source-count"></span>
+            </div>
+            <h3 id="detail-title" class="detail-title"></h3>
+            <p id="detail-summary" class="detail-summary"></p>
+            <div class="markdown-block">
+              <h4>Markdown 正文</h4>
+              <pre id="detail-markdown" class="markdown-content"></pre>
+            </div>
+            <div class="sources-block">
+              <h4>来源</h4>
+              <ul id="detail-sources" class="source-list"></ul>
+            </div>
+          </article>
+        </section>
+      </div>
+
+      <section id="source-viewer" class="source-viewer section-panel" aria-labelledby="source-heading" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">来源归档</p>
+            <h2 id="source-heading">正文查看</h2>
+          </div>
+          <button id="close-source" class="icon-button" type="button" aria-label="关闭来源正文" title="关闭来源正文">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <div class="source-viewer-meta">
+          <a id="source-original-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+          <span id="source-site"></span>
+        </div>
+        <p id="source-error" class="error-message" role="alert" hidden></p>
+        <pre id="source-markdown" class="markdown-content"></pre>
+      </section>
+    </main>
+
+    <footer class="page-footer">AgentNews <span aria-hidden="true">·</span> 静态工作台</footer>
+  </body>
+</html>

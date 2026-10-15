@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .agent import AgentRunner
@@ -23,6 +25,7 @@ from .services.chat import ChatAgentError, ChatService, ChatSessionNotFoundError
 from .services.digest import (
     DigestConfigurationError,
     DigestError,
+    DigestNoSourcesError,
     DigestPreferences,
     DigestService,
 )
@@ -92,9 +95,15 @@ def create_app(
         return resolved_digest_service
 
     app = FastAPI(title="AgentNews API", version="0.1.0")
+    static_root = Path(__file__).resolve().parent / "static"
+    app.mount("/static", StaticFiles(directory=static_root), name="static")
     app.state.repository = app_repository
     app.state.chat_service = chat_service
     app.state.settings = app_settings
+
+    @app.get("/", include_in_schema=False)
+    async def frontend() -> FileResponse:
+        return FileResponse(static_root / "index.html")
 
     @app.exception_handler(ApiError)
     async def handle_api_error(_request: Request, error: ApiError) -> JSONResponse:
@@ -182,6 +191,16 @@ def create_app(
                 "invalid_digest_preferences",
                 "当前日报偏好不足以生成日报。",
             ) from None
+        except DigestNoSourcesError:
+            return {
+                "report_id": None,
+                "title": None,
+                "report_path": None,
+                "source_count": 0,
+                "source_archive_paths": [],
+                "status": "no_results",
+                "message": "没有可靠来源，未生成日报。",
+            }
         except DigestError:
             raise ApiError(
                 502,
