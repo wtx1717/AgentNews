@@ -151,17 +151,18 @@ class DigestService:
         if not sources:
             raise DigestNoSourcesError("没有可靠来源，无法生成日报")
 
-        report_content = _render_report(final_text, sources)
         title = f"{business_date.isoformat()} 新闻日报"
         reservation = self.repository.reserve_report(business_date, title)
         report_id = reservation.id
         stored_report = None
-        stored_sources = []
+        stored_sources: list[StoredSourceArchive] = []
+        archive_paths: list[str] = []
+        indexed_sources: list[tuple[_SourceEvidence, str | None]] = []
         try:
+            report_content = _render_report(final_text, sources)
             stored_report = self.report_storage.save_report(
                 report_id, business_date, title, report_content
             )
-            archive_paths: list[str] = []
             for index, source in enumerate(sources, start=1):
                 archive_path = None
                 if source.body is not None:
@@ -179,6 +180,8 @@ class DigestService:
                     stored_sources.append(stored_source)
                     archive_path = stored_source.relative_path
                     archive_paths.append(archive_path)
+                indexed_sources.append((source, archive_path))
+            for source, archive_path in indexed_sources:
                 self.repository.add_report_source(
                     report_id,
                     title=source.title,
