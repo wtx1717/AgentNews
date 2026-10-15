@@ -16,6 +16,7 @@ from .repositories import (
     ReportReservation,
     ReportSource,
     RepositoryProtocol,
+    SQLiteRepository,
     UserPreferences,
 )
 from .services.digest import (
@@ -46,6 +47,7 @@ __all__ = [
     "ReportSource",
     "ReportStorage",
     "RepositoryProtocol",
+    "SQLiteRepository",
     "Settings",
     "StoredReport",
     "UserPreferences",

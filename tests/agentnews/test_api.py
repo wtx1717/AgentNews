@@ -66,6 +66,7 @@ def _settings(tmp_path):
         mcp_search_api_key=None,
         report_root=tmp_path / "reports",
         source_archive_root=tmp_path / "source_archive",
+        sqlite_path=tmp_path / "agentnews.sqlite3",
     )
 
 
@@ -107,6 +108,35 @@ def test_chat_settings_health_and_session_context(tmp_path):
     assert health.status_code == 200
     assert health.json()["dependencies"]["agent"] == "unconfigured"
     assert "API_KEY" not in health.text
+
+
+def test_default_sqlite_application_persists_across_instances(tmp_path):
+    settings = _settings(tmp_path)
+    first_runner = FakeRunner(AgentRunResult("第一条", 0, "completed"))
+    first = TestClient(create_app(settings=settings, agent_runner=first_runner))
+
+    assert first.put(
+        "/api/settings",
+        json={
+            "display_name": "持久化用户",
+            "email": "persist@example.test",
+            "timezone": "Asia/Shanghai",
+            "topics": ["AI"],
+            "keywords": ["Agent"],
+        },
+    ).status_code == 200
+    chat = first.post("/api/chat", json={"message": "持久化消息"})
+    assert chat.status_code == 200
+    session_id = chat.json()["session_id"]
+
+    second_app = create_app(
+        settings=settings,
+        agent_runner=FakeRunner(AgentRunResult("第二条", 0, "completed")),
+    )
+    second = TestClient(second_app)
+    assert second.get("/api/settings").json()["display_name"] == "持久化用户"
+    assert second.get("/api/settings").json()["topics"] == ["AI"]
+    assert second_app.state.repository.list_messages(session_id)[0].content == "持久化消息"
 
 
 def test_frontend_and_static_assets_are_served_without_secrets_or_browser_storage(tmp_path):

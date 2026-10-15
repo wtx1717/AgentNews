@@ -9,7 +9,11 @@ if TYPE_CHECKING:
     from .migrations import Migration
 
 
-def connect_database(path: str | Path) -> sqlite3.Connection:
+def connect_database(
+    path: str | Path,
+    *,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
     """Open a configured SQLite connection.
 
     The returned connection is owned by the caller and must be closed after
@@ -25,6 +29,7 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
         str(path) if str(path) == ":memory:" else database_path,
         timeout=5.0,
         isolation_level=None,
+        check_same_thread=check_same_thread,
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")

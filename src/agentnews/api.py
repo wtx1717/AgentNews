@@ -16,9 +16,9 @@ from .agent import AgentRunner
 from .config import Settings, get_settings
 from .repositories import (
     InvalidReportPathError,
-    InMemoryRepository,
     ReportStorage,
     RepositoryProtocol,
+    SQLiteRepository,
     SourceArchiveStorage,
     UserPreferences,
 )
@@ -82,7 +82,11 @@ def create_app(
     """Create an API application with replaceable service dependencies."""
 
     app_settings = settings or get_settings()
-    app_repository = repository or InMemoryRepository()
+    app_repository = (
+        repository
+        if repository is not None
+        else SQLiteRepository(app_settings.sqlite_path)
+    )
     report_storage = ReportStorage(app_settings.report_root)
     source_archive_storage = SourceArchiveStorage(app_settings.source_archive_root)
     chat_service = ChatService(app_repository, agent_runner=agent_runner)

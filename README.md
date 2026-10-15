@@ -7,8 +7,9 @@ LangChain Agent tool orchestration is included. The Agent discovers every tool
 published by the configured MCP service and registers those tools alongside the
 four managed local file tools; it does not register arbitrary shell commands.
 The FastAPI backend exposes chat, settings, one-off digest, report, source,
-and health endpoints. It defaults to an in-memory repository for local API
-development; SQLite business persistence remains a later phase.
+and health endpoints. It uses SQLite for business persistence by default;
+explicitly passing `InMemoryRepository` remains available for tests and local
+integration scenarios.
 
 ## Requirements
 
@@ -30,7 +31,9 @@ The Tavily search URL is preconfigured in `.env.example`; add a Tavily API key
 when enabling online search. Search timeout defaults to 20 seconds. Email
 credentials can stay empty until that integration is used.
 The local defaults are `APP_TIMEZONE=Asia/Shanghai`, `REPORT_ROOT=data/reports`,
-and `SQLITE_PATH=data/agentnews.sqlite3`.
+and `SQLITE_PATH=data/agentnews.sqlite3`. The default FastAPI application
+creates and migrates that SQLite file when the application is created; set
+`SQLITE_PATH` to choose a different persistence location.
 
 Configuration is loaded from `.env` and overridden by process environment
 variables. Missing external-service credentials are checked when that service
