@@ -12,6 +12,7 @@ from .digest import (
     DigestStorageError,
 )
 from .chat import ChatAgentError, ChatResult, ChatService, ChatSessionNotFoundError
+from .report import ReportDeletionError, ReportService
 
 __all__ = [
     "DigestConfigurationError",
@@ -27,4 +28,6 @@ __all__ = [
     "ChatResult",
     "ChatService",
     "ChatSessionNotFoundError",
+    "ReportDeletionError",
+    "ReportService",
 ]

@@ -128,6 +128,8 @@ class RepositoryProtocol(Protocol):
 
     def cancel_report(self, report_id: int) -> bool: ...
 
+    def delete_report(self, report_id: int) -> bool: ...
+
     def list_reports(
         self,
         start_date: date | None = None,

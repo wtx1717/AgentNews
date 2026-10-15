@@ -313,6 +313,21 @@ class SQLiteRepository:
             )
             return True
 
+    def delete_report(self, report_id: int) -> bool:
+        _require_positive_id(report_id, "report_id")
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM reports
+                WHERE id = ? AND file_path NOT GLOB ?
+                """,
+                (report_id, _PLACEHOLDER_PREFIX + "*"),
+            ).fetchone()
+            if row is None:
+                return False
+            self._connection.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+            return True
+
     def list_reports(
         self,
         start_date: date | None = None,

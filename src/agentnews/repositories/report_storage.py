@@ -100,6 +100,16 @@ class ReportStorage:
         target.unlink()
         return True
 
+    def delete_report(self, relative_path: str | Path) -> bool:
+        """Delete a report file under the configured root if it exists."""
+        target = self._resolve_report_path(relative_path)
+        if not target.exists() and not target.is_symlink():
+            return False
+        if not target.is_file():
+            raise InvalidReportPathError("report path does not refer to a regular file")
+        target.unlink()
+        return True
+
     def read_report(self, relative_path: str | Path) -> str:
         target = self._resolve_report_path(relative_path)
         self._ensure_contained(target)

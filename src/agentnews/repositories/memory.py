@@ -173,6 +173,14 @@ class InMemoryRepository:
             self._report_sources.pop(report_id, None)
             return True
 
+    def delete_report(self, report_id: int) -> bool:
+        _require_positive_id(report_id, "report_id")
+        with self._lock:
+            if self._reports.pop(report_id, None) is None:
+                return False
+            self._report_sources.pop(report_id, None)
+            return True
+
     def list_reports(
         self,
         start_date: date | None = None,

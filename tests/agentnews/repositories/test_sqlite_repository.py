@@ -153,3 +153,21 @@ def test_foreign_key_cascade_removes_messages_and_sources(tmp_path):
         assert repository.get_report_sources(reservation.id) == ()
     finally:
         repository.close()
+
+
+def test_delete_report_uses_foreign_key_cascade_for_sources(tmp_path):
+    repository = SQLiteRepository(tmp_path / "agentnews.sqlite3")
+    try:
+        reservation = repository.reserve_report(date(2026, 10, 14), "Daily")
+        source = repository.add_report_source(
+            reservation.id, "Source", "https://example.test", "Example"
+        )
+        repository.finalize_report(reservation.id, "daily.md", "", "hash")
+
+        assert repository.delete_report(reservation.id)
+        assert not repository.delete_report(reservation.id)
+        assert repository.get_report(reservation.id) is None
+        assert repository.get_report_sources(reservation.id) == ()
+        assert repository.get_source(source.id) is None
+    finally:
+        repository.close()

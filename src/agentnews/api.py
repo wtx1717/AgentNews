@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,6 +32,7 @@ from .services.digest import (
     DigestPreferences,
     DigestService,
 )
+from .services.report import ReportDeletionError, ReportService
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,9 @@ def create_app(
     )
     report_storage = ReportStorage(app_settings.report_root)
     source_archive_storage = SourceArchiveStorage(app_settings.source_archive_root)
+    report_service = ReportService(
+        app_repository, report_storage, source_archive_storage
+    )
     chat_service = ChatService(app_repository, agent_runner=agent_runner)
     resolved_digest_service = digest_service
 
@@ -304,6 +308,17 @@ def create_app(
             "markdown": markdown,
             "sources": [_source_to_dict(source) for source in app_repository.get_report_sources(report.id)],
         }
+
+    @app.delete("/api/reports/{report_id}", status_code=204)
+    async def delete_report(report_id: int) -> Response:
+        _find_report(app_repository, report_id)
+        try:
+            deleted = report_service.delete_report(report_id)
+        except ReportDeletionError:
+            raise ApiError(500, "report_cleanup_failed", "日报索引已删除，但文件清理失败") from None
+        if not deleted:
+            raise ApiError(404, "report_not_found", "日报不存在")
+        return Response(status_code=204)
 
     @app.get("/api/sources/{source_id}")
     async def get_source(source_id: int) -> dict[str, Any]:

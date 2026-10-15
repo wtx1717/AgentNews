@@ -121,6 +121,18 @@ class SourceArchiveStorage:
         target.unlink()
         return True
 
+    def delete_source(self, relative_path: str | Path) -> bool:
+        """Delete a source archive under the configured root if it exists."""
+        target = self._resolve_path(relative_path)
+        if not target.exists() and not target.is_symlink():
+            return False
+        if not target.is_file():
+            raise InvalidSourceArchivePathError(
+                "archive path does not refer to a regular file"
+            )
+        target.unlink()
+        return True
+
     def read_source(self, relative_path: str | Path) -> str:
         target = self._resolve_path(relative_path)
         return target.read_bytes().decode("utf-8")

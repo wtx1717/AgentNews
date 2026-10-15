@@ -31,6 +31,7 @@ from .services.digest import (
     DigestStorageError,
 )
 from .services.chat import ChatAgentError, ChatResult, ChatService, ChatSessionNotFoundError
+from .services.report import ReportDeletionError, ReportService
 from .api import app, create_app
 
 __all__ = [
@@ -68,6 +69,8 @@ __all__ = [
     "ChatResult",
     "ChatService",
     "ChatSessionNotFoundError",
+    "ReportDeletionError",
+    "ReportService",
     "app",
     "create_app",
 ]

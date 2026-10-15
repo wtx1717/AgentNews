@@ -224,6 +224,49 @@ def test_reports_and_sources_are_read_from_indexed_paths(tmp_path):
     assert client.get("/api/sources/999").status_code == 404
 
 
+def test_delete_report_removes_indexed_files_and_sources(tmp_path):
+    settings = _settings(tmp_path)
+    repository = InMemoryRepository(report_id_factory=lambda: 1)
+    reservation = repository.reserve_report(date(2026, 10, 14), "2026-10-14 新闻日报")
+    report_storage = ReportStorage(settings.report_root)
+    stored_report = report_storage.save_report(
+        reservation.id,
+        reservation.report_date,
+        reservation.title,
+        "# 日报\n\n正文",
+    )
+    archive_storage = SourceArchiveStorage(settings.source_archive_root)
+    stored_source = archive_storage.save_source(
+        1,
+        1,
+        date(2026, 10, 14),
+        "来源标题",
+        "https://example.com/news",
+        "example.com",
+        "2026-10-14T00:00:00Z",
+        None,
+        "来源正文",
+    )
+    repository.add_report_source(
+        1,
+        "来源标题",
+        "https://example.com/news",
+        "example.com",
+        archive_file_path=stored_source.relative_path,
+    )
+    repository.finalize_report(1, stored_report.relative_path, "摘要", stored_report.content_hash)
+
+    client = TestClient(create_app(repository, settings=settings, agent_runner=FakeRunner()))
+    response = client.delete("/api/reports/1")
+
+    assert response.status_code == 204
+    assert client.get("/api/reports/1").status_code == 404
+    assert client.get("/api/sources/1").status_code == 404
+    assert not (settings.report_root / stored_report.relative_path).exists()
+    assert not (settings.source_archive_root / stored_source.relative_path).exists()
+    assert client.delete("/api/reports/1").status_code == 404
+
+
 def test_digest_endpoint_uses_saved_timezone_and_returns_report(tmp_path):
     settings = _settings(tmp_path)
     repository = InMemoryRepository(report_id_factory=lambda: 1)
