@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query, Request
@@ -16,13 +16,20 @@ from .agent import AgentRunner
 from .config import Settings, get_settings
 from .repositories import (
     InvalidReportPathError,
+    ChatMessage,
+    ChatSession,
     ReportStorage,
     RepositoryProtocol,
     SQLiteRepository,
     SourceArchiveStorage,
     UserPreferences,
 )
-from .services.chat import ChatAgentError, ChatService, ChatSessionNotFoundError
+from .services.chat import (
+    ChatAgentError,
+    ChatService,
+    ChatSessionArchivedError,
+    ChatSessionNotFoundError,
+)
 from .services.digest import (
     DigestConfigurationError,
     DigestError,
@@ -71,6 +78,18 @@ class SettingsPayload(_StrictModel):
     timezone: str = "Asia/Shanghai"
     topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+
+
+class SessionTitlePayload(_StrictModel):
+    title: str = Field(min_length=1)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("标题不能为空")
+        return normalized
 
 
 def create_app(
@@ -158,6 +177,8 @@ def create_app(
             result = await chat_service.run(payload.message, payload.session_id)
         except ChatSessionNotFoundError as error:
             raise ApiError(404, "session_not_found", str(error)) from None
+        except ChatSessionArchivedError as error:
+            raise ApiError(409, "session_archived", str(error)) from None
         except ChatAgentError:
             raise ApiError(
                 502,
@@ -172,6 +193,74 @@ def create_app(
             "tool_calls": result.tool_calls,
             "report_ids": list(result.report_ids),
         }
+
+    @app.post("/api/sessions")
+    async def create_session() -> dict[str, Any]:
+        return _session_to_dict(app_repository.create_session())
+
+    @app.get("/api/sessions")
+    async def list_sessions(
+        status: Literal["active", "archived"] = "active",
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        sessions = app_repository.list_sessions(status=status, limit=limit, offset=offset)
+        return {
+            "items": [_session_to_dict(session) for session in sessions],
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_session(session_id: str) -> dict[str, Any]:
+        session = _find_session(app_repository, session_id)
+        try:
+            messages = app_repository.list_messages(session_id)
+        except KeyError:
+            raise ApiError(404, "session_not_found", "会话不存在") from None
+        return {
+            **_session_to_dict(session),
+            "messages": [_message_to_dict(message) for message in messages],
+        }
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(
+        session_id: str,
+        payload: SessionTitlePayload,
+    ) -> dict[str, Any]:
+        _find_session(app_repository, session_id)
+        try:
+            session = app_repository.rename_session(session_id, payload.title)
+        except (TypeError, ValueError):
+            raise ApiError(422, "validation_error", "请求参数无效") from None
+        except KeyError:
+            raise ApiError(404, "session_not_found", "会话不存在") from None
+        return _session_to_dict(session)
+
+    @app.post("/api/sessions/{session_id}/archive")
+    async def archive_session(session_id: str) -> dict[str, Any]:
+        session = _find_session(app_repository, session_id)
+        if session.status != "active":
+            raise ApiError(409, "session_state_conflict", "会话当前不是活动状态")
+        if not app_repository.archive_session(session_id):
+            raise ApiError(409, "session_state_conflict", "会话状态已发生变化")
+        return _session_to_dict(_find_session(app_repository, session_id))
+
+    @app.post("/api/sessions/{session_id}/restore")
+    async def restore_session(session_id: str) -> dict[str, Any]:
+        session = _find_session(app_repository, session_id)
+        if session.status != "archived":
+            raise ApiError(409, "session_state_conflict", "会话当前不是归档状态")
+        if not app_repository.restore_session(session_id):
+            raise ApiError(409, "session_state_conflict", "会话状态已发生变化")
+        return _session_to_dict(_find_session(app_repository, session_id))
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str) -> Response:
+        _find_session(app_repository, session_id)
+        if not app_repository.delete_session(session_id):
+            raise ApiError(404, "session_not_found", "会话不存在")
+        return Response(status_code=204)
 
     @app.get("/api/settings")
     async def get_settings_endpoint() -> dict[str, Any]:
@@ -363,6 +452,35 @@ def _preferences_to_dict(preferences: UserPreferences) -> dict[str, Any]:
         "timezone": preferences.timezone,
         "topics": list(preferences.topics),
         "keywords": list(preferences.keywords),
+    }
+
+
+def _find_session(repository: RepositoryProtocol, session_id: str) -> ChatSession:
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ApiError(404, "session_not_found", "会话不存在")
+    session = repository.get_session(session_id)
+    if session is None:
+        raise ApiError(404, "session_not_found", "会话不存在")
+    return session
+
+
+def _session_to_dict(session: ChatSession) -> dict[str, Any]:
+    return {
+        "id": session.id,
+        "title": session.title,
+        "status": session.status,
+        "created_at": session.created_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+        "archived_at": session.archived_at.isoformat() if session.archived_at else None,
+    }
+
+
+def _message_to_dict(message: ChatMessage) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "created_at": message.created_at.isoformat(),
     }
 
 

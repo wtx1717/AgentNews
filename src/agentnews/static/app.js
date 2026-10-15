@@ -1,8 +1,25 @@
 "use strict";
 
-const state = { sessionId: null, reportOffset: 0, reportLimit: 10, selectedReportId: null };
+const CURRENT_SESSION_KEY = "agentnews.currentSessionId";
+const state = {
+  sessionId: null,
+  sessionStatus: null,
+  sessionView: "active",
+  sessionRequest: 0,
+  sessionBusy: false,
+  reportOffset: 0,
+  reportLimit: 10,
+  selectedReportId: null,
+};
 const elements = {
   today: document.querySelector("#today-label"),
+  newSession: document.querySelector("#new-session"),
+  sessionsActive: document.querySelector("#sessions-active"),
+  sessionsArchived: document.querySelector("#sessions-archived"),
+  sessionsStatus: document.querySelector("#sessions-status"),
+  sessionList: document.querySelector("#session-list"),
+  sessionsError: document.querySelector("#sessions-error"),
+  restoreCurrent: document.querySelector("#restore-current-session"),
   chatForm: document.querySelector("#chat-form"),
   chatInput: document.querySelector("#chat-input"),
   chatMessages: document.querySelector("#chat-messages"),
@@ -57,6 +74,7 @@ async function request(path, options = {}) {
     ...options,
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
+  if (response.status === 204) return null;
   let payload;
   try {
     payload = await response.json();
@@ -64,7 +82,10 @@ async function request(path, options = {}) {
     throw new Error("服务器返回了无法读取的响应");
   }
   if (!response.ok) {
-    throw new Error(payload?.error?.message || "请求失败，请稍后重试");
+    const error = new Error(payload?.error?.message || "请求失败，请稍后重试");
+    error.code = payload?.error?.code || "request_failed";
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -81,6 +102,35 @@ function setFormValues(form, preferences) {
   form.elements.keywords.value = (preferences.keywords || []).join("\n");
 }
 
+function readStoredSession() {
+  try {
+    return window.localStorage.getItem(CURRENT_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeCurrentSession(sessionId) {
+  try {
+    if (sessionId) window.localStorage.setItem(CURRENT_SESSION_KEY, sessionId);
+    else window.localStorage.removeItem(CURRENT_SESSION_KEY);
+  } catch {
+    // Private browsing may disable storage; the current page remains usable.
+  }
+}
+
+function formatSessionTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function appendMessage(role, text) {
   const empty = elements.chatMessages.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -88,58 +138,278 @@ function appendMessage(role, text) {
   article.className = `message message-${role}`;
   const label = document.createElement("p");
   label.className = "message-role";
-  label.textContent = role === "user" ? "你" : "助手";
+  label.textContent = { user: "你", assistant: "助手", system: "系统", tool: "工具" }[role] || role;
   const body = document.createElement("p");
   body.className = "message-body";
   body.textContent = text;
   article.append(label, body);
   elements.chatMessages.append(article);
+}
+
+function renderMessages(messages) {
+  elements.chatMessages.replaceChildren();
+  if (!messages?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state chat-empty";
+    empty.textContent = "开始一段新对话";
+    elements.chatMessages.append(empty);
+    return;
+  }
+  for (const message of messages) appendMessage(message.role, message.content);
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
 }
 
-async function loadPreferences() {
-  elements.preferencesStatus.textContent = "读取中…";
-  try {
-    setFormValues(elements.preferencesForm, await request("/api/settings"));
-    elements.preferencesStatus.textContent = "已载入";
-  } catch (error) {
-    elements.preferencesStatus.textContent = "读取失败";
-    setError(elements.preferencesError, error.message);
+function updateChatAvailability() {
+  const archived = state.sessionStatus === "archived";
+  elements.chatInput.disabled = state.sessionBusy || archived;
+  elements.chatForm.querySelector("button[type=submit]").disabled = state.sessionBusy || archived;
+  elements.restoreCurrent.hidden = !archived;
+}
+
+function setSessionBusy(busy) {
+  state.sessionBusy = busy;
+  for (const control of document.querySelectorAll(".session-control")) control.disabled = busy;
+  updateChatAvailability();
+}
+
+function clearCurrentSession() {
+  state.sessionId = null;
+  state.sessionStatus = null;
+  storeCurrentSession(null);
+  renderMessages([]);
+  elements.chatSession.textContent = "尚未选择会话";
+  elements.toolCalls.textContent = "0";
+  setStatus(elements.chatStatus, "idle");
+  setError(elements.chatError, "");
+  updateChatAvailability();
+}
+
+function setCurrentSession(session) {
+  state.sessionId = session?.id || null;
+  state.sessionStatus = session?.status || null;
+  if (session?.status === "active") storeCurrentSession(session.id);
+  else storeCurrentSession(null);
+  elements.chatSession.textContent = session?.title || "未命名会话";
+  if (session?.status === "archived") {
+    setStatus(elements.chatStatus, "idle", "归档会话（只读）");
+  } else {
+    setStatus(elements.chatStatus, "idle");
+  }
+  updateChatAvailability();
+  for (const item of elements.sessionList.querySelectorAll(".session-item")) {
+    item.setAttribute("aria-current", String(item.dataset.sessionId === state.sessionId));
   }
 }
 
-async function savePreferences(event) {
-  event.preventDefault();
-  const form = elements.preferencesForm;
-  const submit = form.querySelector("[type=submit]");
-  submit.disabled = true;
-  elements.preferencesStatus.textContent = "保存中…";
-  setError(elements.preferencesError, "");
-  const payload = {
-    display_name: form.elements.display_name.value.trim(),
-    email: form.elements.email.value.trim(),
-    timezone: form.elements.timezone.value.trim() || "Asia/Shanghai",
-    topics: parseList(form.elements.topics.value),
-    keywords: parseList(form.elements.keywords.value),
-  };
+function setSessionView(status) {
+  state.sessionView = status;
+  elements.sessionsActive.setAttribute("aria-selected", String(status === "active"));
+  elements.sessionsArchived.setAttribute("aria-selected", String(status === "archived"));
+}
+
+function makeSessionItem(session) {
+  const item = document.createElement("article");
+  item.className = "session-item";
+  item.dataset.sessionId = session.id;
+  item.setAttribute("aria-current", String(session.id === state.sessionId));
+
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "session-select session-control";
+  select.title = "打开会话";
+  const title = document.createElement("span");
+  title.className = "session-title";
+  title.textContent = session.title || "未命名会话";
+  const time = document.createElement("span");
+  time.className = "session-time";
+  time.textContent = formatSessionTime(session.updated_at);
+  select.append(title, time);
+  select.addEventListener("click", () => loadSessionDetail(session.id));
+
+  const actions = document.createElement("span");
+  actions.className = "session-actions";
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "session-action session-control";
+  rename.title = "重命名会话";
+  rename.setAttribute("aria-label", "重命名会话");
+  rename.textContent = "改";
+  rename.addEventListener("click", () => renameSession(session));
+  const transition = document.createElement("button");
+  transition.type = "button";
+  transition.className = "session-action session-control";
+  transition.title = session.status === "active" ? "归档会话" : "恢复会话";
+  transition.setAttribute("aria-label", transition.title);
+  transition.textContent = session.status === "active" ? "归" : "恢";
+  transition.addEventListener("click", () => session.status === "active"
+    ? archiveSession(session)
+    : restoreSession(session));
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "session-action session-action-delete session-control";
+  remove.title = "永久删除会话";
+  remove.setAttribute("aria-label", "永久删除会话");
+  remove.textContent = "删";
+  remove.addEventListener("click", () => deleteSession(session));
+  actions.append(rename, transition, remove);
+  item.append(select, actions);
+  return item;
+}
+
+function renderSessionList(items) {
+  elements.sessionList.replaceChildren();
+  if (!items?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = state.sessionView === "active" ? "暂无活动会话" : "暂无归档会话";
+    elements.sessionList.append(empty);
+    return;
+  }
+  for (const session of items) elements.sessionList.append(makeSessionItem(session));
+}
+
+async function loadSessions(status = state.sessionView) {
+  setSessionView(status);
+  elements.sessionsStatus.textContent = "读取中…";
+  setError(elements.sessionsError, "");
   try {
-    const saved = await request("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
-    setFormValues(form, saved);
-    elements.preferencesStatus.textContent = "已保存";
+    const page = await request(`/api/sessions?status=${status}&limit=100&offset=0`);
+    renderSessionList(page.items || []);
+    elements.sessionsStatus.textContent = page.items?.length ? `${page.items.length} 个会话` : "暂无会话";
   } catch (error) {
-    elements.preferencesStatus.textContent = "失败";
-    setError(elements.preferencesError, error.message);
+    renderSessionList([]);
+    elements.sessionsStatus.textContent = "读取失败";
+    setError(elements.sessionsError, error.message);
+  }
+}
+
+async function loadSessionDetail(sessionId, { initial = false } = {}) {
+  if (!sessionId) return;
+  const requestId = ++state.sessionRequest;
+  setSessionBusy(true);
+  setError(elements.chatError, "");
+  setStatus(elements.chatStatus, "running", "读取会话中…");
+  try {
+    const session = await request(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (requestId !== state.sessionRequest) return;
+    if (initial && session.status !== "active") {
+      clearCurrentSession();
+      return;
+    }
+    setCurrentSession(session);
+    renderMessages(session.messages || []);
+    elements.toolCalls.textContent = "0";
+  } catch (error) {
+    if (requestId !== state.sessionRequest) return;
+    if (error.code === "session_not_found" || (initial && error.status === 404)) {
+      clearCurrentSession();
+    } else {
+      setStatus(elements.chatStatus, "failed");
+      setError(elements.chatError, error.message);
+    }
   } finally {
-    submit.disabled = false;
+    if (requestId === state.sessionRequest) {
+      setSessionBusy(false);
+      if (state.sessionStatus !== "archived" && state.sessionId) setStatus(elements.chatStatus, "idle");
+    }
+  }
+}
+
+async function initializeSessions() {
+  await loadSessions("active");
+  const storedId = readStoredSession();
+  if (storedId) await loadSessionDetail(storedId, { initial: true });
+  else clearCurrentSession();
+}
+
+async function createSession() {
+  if (state.sessionBusy) return;
+  setSessionBusy(true);
+  setError(elements.sessionsError, "");
+  try {
+    const session = await request("/api/sessions", { method: "POST" });
+    setCurrentSession(session);
+    renderMessages([]);
+    elements.toolCalls.textContent = "0";
+    await loadSessions("active");
+    elements.chatInput.focus();
+  } catch (error) {
+    setError(elements.sessionsError, error.message);
+  } finally {
+    setSessionBusy(false);
+  }
+}
+
+async function renameSession(session) {
+  if (state.sessionBusy) return;
+  const title = window.prompt("请输入新的会话标题", session.title || "");
+  if (title === null || !title.trim()) return;
+  setSessionBusy(true);
+  try {
+    const updated = await request(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    if (state.sessionId === updated.id) setCurrentSession(updated);
+    await loadSessions(state.sessionView);
+  } catch (error) {
+    setError(elements.sessionsError, error.message);
+  } finally {
+    setSessionBusy(false);
+  }
+}
+
+async function archiveSession(session) {
+  if (state.sessionBusy) return;
+  setSessionBusy(true);
+  try {
+    await request(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST", body: "{}" });
+    if (state.sessionId === session.id) clearCurrentSession();
+    await loadSessions(state.sessionView);
+  } catch (error) {
+    setError(elements.sessionsError, error.message);
+  } finally {
+    setSessionBusy(false);
+  }
+}
+
+async function restoreSession(session) {
+  if (state.sessionBusy) return;
+  setSessionBusy(true);
+  try {
+    const restored = await request(`/api/sessions/${encodeURIComponent(session.id)}/restore`, { method: "POST", body: "{}" });
+    setCurrentSession(restored);
+    await loadSessions("active");
+    await loadSessionDetail(restored.id);
+  } catch (error) {
+    setError(elements.sessionsError, error.message);
+  } finally {
+    setSessionBusy(false);
+  }
+}
+
+async function deleteSession(session) {
+  if (state.sessionBusy) return;
+  if (!window.confirm(`永久删除“${session.title || "未命名会话"}”？此操作不可恢复。`)) return;
+  setSessionBusy(true);
+  try {
+    await request(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+    if (state.sessionId === session.id) clearCurrentSession();
+    await loadSessions(state.sessionView);
+  } catch (error) {
+    setError(elements.sessionsError, error.message);
+  } finally {
+    setSessionBusy(false);
   }
 }
 
 async function sendChat(event) {
   event.preventDefault();
   const message = elements.chatInput.value.trim();
-  if (!message) return;
+  if (!message || state.sessionStatus === "archived" || state.sessionBusy) return;
   const button = elements.chatForm.querySelector("button");
-  button.disabled = true;
+  const requestSessionId = state.sessionId;
+  setSessionBusy(true);
   setError(elements.chatError, "");
   setStatus(elements.chatStatus, "running");
   appendMessage("user", message);
@@ -147,18 +417,18 @@ async function sendChat(event) {
   try {
     const result = await request("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ session_id: state.sessionId, message }),
+      body: JSON.stringify({ session_id: requestSessionId, message }),
     });
-    state.sessionId = result.session_id;
-    elements.chatSession.textContent = "会话已连接";
+    await loadSessionDetail(result.session_id);
+    await loadSessions("active");
     elements.toolCalls.textContent = String(result.tool_calls ?? 0);
-    appendMessage("assistant", result.answer || "");
     setStatus(elements.chatStatus, "completed");
   } catch (error) {
     setStatus(elements.chatStatus, "failed");
     setError(elements.chatError, error.message);
   } finally {
     button.disabled = false;
+    setSessionBusy(false);
     elements.chatInput.focus();
   }
 }
@@ -292,6 +562,43 @@ async function loadSource(sourceId) {
   }
 }
 
+async function loadPreferences() {
+  elements.preferencesStatus.textContent = "读取中…";
+  try {
+    setFormValues(elements.preferencesForm, await request("/api/settings"));
+    elements.preferencesStatus.textContent = "已载入";
+  } catch (error) {
+    elements.preferencesStatus.textContent = "读取失败";
+    setError(elements.preferencesError, error.message);
+  }
+}
+
+async function savePreferences(event) {
+  event.preventDefault();
+  const form = elements.preferencesForm;
+  const submit = form.querySelector("[type=submit]");
+  submit.disabled = true;
+  elements.preferencesStatus.textContent = "保存中…";
+  setError(elements.preferencesError, "");
+  const payload = {
+    display_name: form.elements.display_name.value.trim(),
+    email: form.elements.email.value.trim(),
+    timezone: form.elements.timezone.value.trim() || "Asia/Shanghai",
+    topics: parseList(form.elements.topics.value),
+    keywords: parseList(form.elements.keywords.value),
+  };
+  try {
+    const saved = await request("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+    setFormValues(form, saved);
+    elements.preferencesStatus.textContent = "已保存";
+  } catch (error) {
+    elements.preferencesStatus.textContent = "失败";
+    setError(elements.preferencesError, error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 async function runDigest() {
   elements.digestButton.disabled = true;
   elements.digestMessage.textContent = "";
@@ -317,6 +624,13 @@ async function runDigest() {
 
 elements.today.dateTime = new Date().toISOString();
 elements.today.textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full" }).format(new Date());
+elements.newSession.addEventListener("click", createSession);
+elements.sessionsActive.addEventListener("click", () => loadSessions("active"));
+elements.sessionsArchived.addEventListener("click", () => loadSessions("archived"));
+elements.restoreCurrent.addEventListener("click", async () => {
+  if (!state.sessionId) return;
+  await restoreSession({ id: state.sessionId, title: elements.chatSession.textContent, status: "archived" });
+});
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.chatForm.addEventListener("submit", sendChat);
 elements.digestButton.addEventListener("click", runDigest);
@@ -325,4 +639,5 @@ elements.loadMore.addEventListener("click", () => loadReports());
 document.querySelector("#close-source").addEventListener("click", () => { elements.sourceViewer.hidden = true; });
 
 loadPreferences();
+initializeSessions();
 loadReports({ reset: true });

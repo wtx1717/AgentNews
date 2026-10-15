@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -156,8 +157,11 @@ def test_frontend_and_static_assets_are_served_without_secrets_or_browser_storag
     static_root = Path(api_module.__file__).parent / "static"
     frontend_source = "\n".join(path.read_text(encoding="utf-8") for path in static_root.iterdir())
     lowered_source = frontend_source.lower()
-    for forbidden in ("localstorage", "sessionstorage", "api_key", "smtp", "password", "secret"):
+    for forbidden in ("sessionstorage", "api_key", "smtp", "password", "secret"):
         assert forbidden not in lowered_source
+    assert "currentSessionId" in script.text
+    assert 'id="session-list"' in page.text
+    assert 'id="sessions-archived"' in page.text
 
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):
@@ -288,7 +292,7 @@ def test_digest_endpoint_uses_saved_timezone_and_returns_report(tmp_path):
     assert response.json()["status"] == "completed"
     assert response.json()["report_id"] == 1
     assert digest.calls[0][0].topics == ("AI",)
-    assert digest.calls[0][1] == date(2026, 10, 15)
+    assert digest.calls[0][1] == datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
 def test_digest_without_reliable_sources_returns_no_results_without_indexing(tmp_path):
@@ -326,3 +330,87 @@ def test_validation_and_missing_session_use_unified_errors(tmp_path):
     )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "session_not_found"
+
+
+def test_session_api_lifecycle_and_message_reading(tmp_path):
+    repository = InMemoryRepository()
+    runner = FakeRunner(AgentRunResult("回答", 1, "completed"))
+    client = TestClient(create_app(repository, agent_runner=runner, settings=_settings(tmp_path)))
+
+    created = client.post("/api/sessions")
+    assert created.status_code == 200
+    session = created.json()
+    assert session["status"] == "active"
+    assert session["title"] is None
+    assert session["archived_at"] is None
+
+    chat = client.post(
+        "/api/chat", json={"session_id": session["id"], "message": "第一条消息"}
+    )
+    assert chat.status_code == 200
+    detail = client.get(f"/api/sessions/{session['id']}")
+    assert detail.status_code == 200
+    assert [message["role"] for message in detail.json()["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert "metadata" not in detail.json()["messages"][0]
+
+    renamed = client.patch(
+        f"/api/sessions/{session['id']}", json={"title": "手动标题"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "手动标题"
+
+    archived = client.post(f"/api/sessions/{session['id']}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert client.get("/api/sessions").json()["items"] == []
+    assert client.get("/api/sessions?status=archived").json()["items"][0]["id"] == session["id"]
+
+    blocked = client.post(
+        "/api/chat", json={"session_id": session["id"], "message": "不应写入"}
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "session_archived"
+    assert len(repository.list_messages(session["id"])) == 2
+    assert client.post(f"/api/sessions/{session['id']}/archive").json()["error"]["code"] == "session_state_conflict"
+
+    restored = client.post(f"/api/sessions/{session['id']}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "active"
+    assert client.post(f"/api/sessions/{session['id']}/restore").json()["error"]["code"] == "session_state_conflict"
+
+    deleted = client.delete(f"/api/sessions/{session['id']}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/sessions/{session['id']}").json()["error"]["code"] == "session_not_found"
+    assert client.delete(f"/api/sessions/{session['id']}").json()["error"]["code"] == "session_not_found"
+
+
+def test_session_api_pagination_validation_and_sqlite_restart(tmp_path):
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository, agent_runner=FakeRunner(), settings=_settings(tmp_path)))
+    first = client.post("/api/sessions").json()
+    second = client.post("/api/sessions").json()
+    page = client.get("/api/sessions?limit=1&offset=1")
+    assert page.status_code == 200
+    assert page.json()["limit"] == 1
+    assert len(page.json()["items"]) == 1
+    assert page.json()["items"][0]["id"] in {first["id"], second["id"]}
+    assert client.get("/api/sessions?status=unknown").status_code == 422
+    assert client.get("/api/sessions?limit=0").status_code == 422
+    assert client.get("/api/sessions/missing").json()["error"]["code"] == "session_not_found"
+
+    settings = _settings(tmp_path / "sqlite")
+    first_client = TestClient(create_app(settings=settings, agent_runner=FakeRunner()))
+    created = first_client.post("/api/sessions").json()
+    sent = first_client.post(
+        "/api/chat", json={"session_id": created["id"], "message": "跨实例消息"}
+    )
+    assert sent.status_code == 200
+
+    second_app = create_app(settings=settings, agent_runner=FakeRunner())
+    second_client = TestClient(second_app)
+    restarted = second_client.get(f"/api/sessions/{created['id']}")
+    assert restarted.status_code == 200
+    assert restarted.json()["messages"][0]["content"] == "跨实例消息"

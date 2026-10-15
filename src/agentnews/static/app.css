@@ -49,6 +49,24 @@ h4 { margin: 0; font-size: 13px; }
 .today-label { color: var(--muted); font-size: 13px; }
 
 .primary-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 42px; padding: 32px 0 36px; border-bottom: 1px solid var(--line); }
+.chat-workspace { min-width: 0; display: grid; grid-template-columns: minmax(190px, .34fr) minmax(0, 1fr); gap: 22px; }
+.session-sidebar { min-width: 0; }
+.session-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 0 6px; padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: #f5f8f6; }
+.session-tab { min-height: 30px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; }
+.session-tab[aria-selected="true"] { background: white; color: var(--green); box-shadow: 0 1px 3px #d8e1db; }
+.session-list { display: grid; gap: 6px; max-height: 335px; overflow: auto; }
+.session-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 6px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: white; }
+.session-item[aria-current="true"] { border-color: #69a082; background: #f4faf5; }
+.session-select { min-width: 0; padding: 0; border: 0; background: transparent; color: var(--ink); text-align: left; }
+.session-title { display: block; overflow: hidden; font-size: 12px; font-weight: 700; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.session-time { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.session-actions { display: flex; align-items: flex-start; gap: 4px; }
+.session-action { width: 25px; min-width: 25px; min-height: 25px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 11px; }
+.session-action:hover { color: var(--green); background: var(--green-light); }
+.session-action-delete:hover { color: #a54135; background: var(--coral-light); }
+.chat-heading-actions { display: flex; align-items: center; gap: 10px; }
+.chat-heading-actions .button-secondary { min-height: 30px; padding: 0 10px; font-size: 11px; }
+.conversation { min-width: 0; }
 .section-panel { min-width: 0; }
 .section-heading { min-height: 44px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .section-heading .eyebrow { margin-bottom: 4px; }
@@ -145,6 +163,7 @@ textarea { line-height: 1.45; }
 
 @media (max-width: 800px) {
   .primary-grid { grid-template-columns: 1fr; gap: 34px; }
+  .chat-workspace { grid-template-columns: minmax(210px, .36fr) minmax(0, 1fr); }
   .preferences { padding-top: 25px; border-top: 1px solid var(--line); }
   .reports-grid { grid-template-columns: 1fr; gap: 32px; }
   .report-detail { padding-top: 25px; border-top: 1px solid var(--line); }
@@ -157,6 +176,9 @@ textarea { line-height: 1.45; }
   h1 { font-size: 25px; }
   .today-label { max-width: 125px; text-align: right; line-height: 1.4; }
   .primary-grid, .reports-grid { padding-top: 25px; }
+  .chat-workspace { grid-template-columns: 1fr; gap: 20px; }
+  .session-list { max-height: 230px; }
+  .session-sidebar { padding-bottom: 4px; }
   .chat-messages { height: 260px; padding: 12px; }
   .field-row { grid-template-columns: 1fr; }
   .digest-band { grid-template-columns: 1fr; }

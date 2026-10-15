@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..agent import AgentRunResult, AgentRunner, create_agent_runner
-from ..repositories import ChatMessage, RepositoryProtocol
+from ..repositories import ChatMessage, RepositoryProtocol, SessionArchivedError
 
 
 class ChatError(RuntimeError):
@@ -14,6 +14,10 @@ class ChatError(RuntimeError):
 
 class ChatSessionNotFoundError(ChatError):
     """The requested chat session does not exist."""
+
+
+class ChatSessionArchivedError(ChatError):
+    """The requested chat session is archived and cannot accept messages."""
 
 
 class ChatAgentError(ChatError):
@@ -56,6 +60,11 @@ class ChatService:
             active_session_id = self.repository.create_session().id
             history: tuple[ChatMessage, ...] = ()
         else:
+            session = self.repository.get_session(session_id)
+            if session is None:
+                raise ChatSessionNotFoundError("会话不存在") from None
+            if session.status != "active":
+                raise ChatSessionArchivedError("会话已归档，请先恢复") from None
             try:
                 history = self.repository.list_messages(session_id)
             except KeyError:
@@ -63,7 +72,10 @@ class ChatService:
             active_session_id = session_id
 
         context = _render_history(history)
-        self.repository.append_message(active_session_id, "user", normalized_message)
+        try:
+            self.repository.append_message(active_session_id, "user", normalized_message)
+        except SessionArchivedError:
+            raise ChatSessionArchivedError("会话已归档，请先恢复") from None
         try:
             run = await self.get_agent_runner().ainvoke(
                 normalized_message,

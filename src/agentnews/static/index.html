@@ -30,30 +30,54 @@
       </section>
 
       <div class="primary-grid">
-        <section class="conversation section-panel" aria-labelledby="chat-heading">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">对话</p>
-              <h2 id="chat-heading">研究助手</h2>
+        <div class="chat-workspace">
+          <aside class="session-sidebar section-panel" aria-labelledby="session-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">会话</p>
+                <h2 id="session-heading">聊天记录</h2>
+              </div>
+              <button id="new-session" class="icon-button session-control" type="button" aria-label="新建会话" title="新建会话">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
             </div>
-            <span id="chat-status" class="status status-idle" role="status" aria-live="polite">尚未执行</span>
-          </div>
-          <div id="chat-messages" class="chat-messages" aria-live="polite" aria-relevant="additions">
-            <div class="empty-state chat-empty">开始一段新对话</div>
-          </div>
-          <p id="chat-error" class="error-message" role="alert" hidden></p>
-          <form id="chat-form" class="chat-form">
-            <label class="sr-only" for="chat-input">发送消息</label>
-            <textarea id="chat-input" name="message" rows="2" maxlength="4000" placeholder="输入消息…" required></textarea>
-            <button class="button button-primary send-button" type="submit" aria-label="发送消息" title="发送消息">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
-            </button>
-          </form>
-          <div class="chat-footer">
-            <span>工具调用 <strong id="tool-call-count">0</strong></span>
-            <span id="chat-session-label">临时会话</span>
-          </div>
-        </section>
+            <div class="session-tabs" role="tablist" aria-label="会话状态">
+              <button id="sessions-active" class="session-tab session-control" type="button" role="tab" aria-selected="true">活动</button>
+              <button id="sessions-archived" class="session-tab session-control" type="button" role="tab" aria-selected="false">归档</button>
+            </div>
+            <p id="sessions-status" class="list-status" role="status" aria-live="polite"></p>
+            <div id="session-list" class="session-list"></div>
+            <p id="sessions-error" class="error-message" role="alert" hidden></p>
+          </aside>
+
+          <section class="conversation section-panel" aria-labelledby="chat-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">对话</p>
+                <h2 id="chat-heading">研究助手</h2>
+              </div>
+              <div class="chat-heading-actions">
+                <button id="restore-current-session" class="button button-secondary session-control" type="button" hidden>恢复会话</button>
+                <span id="chat-status" class="status status-idle" role="status" aria-live="polite">尚未执行</span>
+              </div>
+            </div>
+            <div id="chat-messages" class="chat-messages" aria-live="polite" aria-relevant="additions">
+              <div class="empty-state chat-empty">开始一段新对话</div>
+            </div>
+            <p id="chat-error" class="error-message" role="alert" hidden></p>
+            <form id="chat-form" class="chat-form">
+              <label class="sr-only" for="chat-input">发送消息</label>
+              <textarea id="chat-input" name="message" rows="2" maxlength="4000" placeholder="输入消息…" required></textarea>
+              <button class="button button-primary send-button" type="submit" aria-label="发送消息" title="发送消息">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+              </button>
+            </form>
+            <div class="chat-footer">
+              <span>工具调用 <strong id="tool-call-count">0</strong></span>
+              <span id="chat-session-label">尚未选择会话</span>
+            </div>
+          </section>
+        </div>
 
         <section class="preferences section-panel" aria-labelledby="preferences-heading">
           <div class="section-heading">
