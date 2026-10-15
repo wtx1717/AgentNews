@@ -16,6 +16,8 @@ from .repositories import (
     ReportReservation,
     ReportSource,
     RepositoryProtocol,
+    SessionArchivedError,
+    SessionStatus,
     SQLiteRepository,
     UserPreferences,
 )
@@ -48,6 +50,8 @@ __all__ = [
     "ReportSource",
     "ReportStorage",
     "RepositoryProtocol",
+    "SessionArchivedError",
+    "SessionStatus",
     "SQLiteRepository",
     "Settings",
     "StoredReport",

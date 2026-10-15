@@ -8,6 +8,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
+SessionStatus = Literal["active", "archived"]
+
+
+class SessionArchivedError(RuntimeError):
+    """Raised when a write is attempted against an archived session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +58,8 @@ class ChatSession:
     title: str | None
     created_at: datetime
     updated_at: datetime
+    status: SessionStatus = "active"
+    archived_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +112,23 @@ class RepositoryProtocol(Protocol):
     def save_preferences(self, preferences: UserPreferences) -> UserPreferences: ...
 
     def create_session(self, title: str | None = None) -> ChatSession: ...
+
+    def get_session(self, session_id: str) -> ChatSession | None: ...
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]: ...
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession: ...
+
+    def archive_session(self, session_id: str) -> bool: ...
+
+    def restore_session(self, session_id: str) -> bool: ...
+
+    def delete_session(self, session_id: str) -> bool: ...
 
     def append_message(
         self,

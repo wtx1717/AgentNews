@@ -16,6 +16,8 @@ from .protocol import (
     ReportRecord,
     ReportReservation,
     ReportSource,
+    SessionArchivedError,
+    SessionStatus,
     UserPreferences,
 )
 
@@ -60,11 +62,90 @@ class InMemoryRepository:
             title=normalized_title,
             created_at=now,
             updated_at=now,
+            status="active",
+            archived_at=None,
         )
         with self._lock:
             self._sessions[session.id] = session
             self._messages[session.id] = []
         return session
+
+    def get_session(self, session_id: str) -> ChatSession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]:
+        _validate_session_listing(status, limit, offset)
+        with self._lock:
+            sessions = [
+                session for session in self._sessions.values() if session.status == status
+            ]
+            sessions.sort(
+                key=lambda session: (session.updated_at, session.created_at, session.id),
+                reverse=True,
+            )
+            return tuple(sessions[offset : offset + limit])
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession:
+        normalized_title = _normalize_session_title(title)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise KeyError(f"unknown session: {session_id}")
+            renamed = ChatSession(
+                id=session.id,
+                title=normalized_title,
+                created_at=session.created_at,
+                updated_at=_utc_now(),
+                status=session.status,
+                archived_at=session.archived_at,
+            )
+            self._sessions[session_id] = renamed
+            return renamed
+
+    def archive_session(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.status != "active":
+                return False
+            archived_at = _utc_now()
+            self._sessions[session_id] = ChatSession(
+                id=session.id,
+                title=session.title,
+                created_at=session.created_at,
+                updated_at=archived_at,
+                status="archived",
+                archived_at=archived_at,
+            )
+            return True
+
+    def restore_session(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.status != "archived":
+                return False
+            restored_at = _utc_now()
+            self._sessions[session_id] = ChatSession(
+                id=session.id,
+                title=session.title,
+                created_at=session.created_at,
+                updated_at=restored_at,
+                status="active",
+                archived_at=None,
+            )
+            return True
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            if self._sessions.pop(session_id, None) is None:
+                return False
+            self._messages.pop(session_id, None)
+            return True
 
     def append_message(
         self,
@@ -82,6 +163,8 @@ class InMemoryRepository:
             session = self._sessions.get(session_id)
             if session is None:
                 raise KeyError(f"unknown session: {session_id}")
+            if session.status == "archived":
+                raise SessionArchivedError(f"session is archived: {session_id}")
             message = ChatMessage(
                 id=self._next_message_id,
                 session_id=session_id,
@@ -92,11 +175,16 @@ class InMemoryRepository:
             )
             self._next_message_id += 1
             self._messages[session_id].append(message)
+            title = session.title
+            if role == "user" and title is None:
+                title = _title_from_user_message(content)
             self._sessions[session_id] = ChatSession(
                 id=session.id,
-                title=session.title,
+                title=title,
                 created_at=session.created_at,
                 updated_at=message.created_at,
+                status=session.status,
+                archived_at=session.archived_at,
             )
             return message
 
@@ -279,6 +367,33 @@ def _normalize_preferences(value: UserPreferences) -> UserPreferences:
         topics=value.topics,
         keywords=value.keywords,
     )
+
+
+def _validate_session_listing(
+    status: SessionStatus,
+    limit: int,
+    offset: int,
+) -> None:
+    if status not in {"active", "archived"}:
+        raise ValueError("status must be active or archived")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+
+
+def _normalize_session_title(title: str) -> str:
+    if not isinstance(title, str):
+        raise TypeError("title must be a string")
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("title must not be empty")
+    return normalized
+
+
+def _title_from_user_message(content: str) -> str | None:
+    normalized = " ".join(content.split())
+    return normalized[:80] or None
 
 
 def _freeze_metadata(value: Mapping[str, object] | None) -> Mapping[str, object] | None:

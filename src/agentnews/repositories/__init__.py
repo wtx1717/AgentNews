@@ -10,6 +10,8 @@ from .protocol import (
     ReportReservation,
     ReportSource,
     RepositoryProtocol,
+    SessionArchivedError,
+    SessionStatus,
     UserPreferences,
 )
 from .report_storage import (
@@ -36,6 +38,8 @@ __all__ = [
     "ReportSource",
     "ReportStorage",
     "RepositoryProtocol",
+    "SessionArchivedError",
+    "SessionStatus",
     "StoredReport",
     "InvalidSourceArchivePathError",
     "SourceArchiveStorage",

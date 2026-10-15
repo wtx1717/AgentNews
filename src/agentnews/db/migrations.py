@@ -129,12 +129,39 @@ def _add_report_source_archive_path(connection: sqlite3.Connection) -> None:
         )
 
 
+def _add_chat_session_lifecycle(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(chat_sessions)").fetchall()
+    }
+    if "status" not in columns:
+        connection.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'active' "
+            "CHECK (status IN ('active', 'archived'))"
+        )
+    if "archived_at" not in columns:
+        connection.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT"
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_status_updated_at
+            ON chat_sessions(status, updated_at DESC)
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
     Migration(
         version=2,
         name="report_source_archive_path",
         apply=_add_report_source_archive_path,
+    ),
+    Migration(
+        version=3,
+        name="chat_session_lifecycle",
+        apply=_add_chat_session_lifecycle,
     ),
 )
 

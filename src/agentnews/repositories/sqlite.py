@@ -19,6 +19,8 @@ from .protocol import (
     ReportRecord,
     ReportReservation,
     ReportSource,
+    SessionArchivedError,
+    SessionStatus,
     UserPreferences,
 )
 
@@ -124,8 +126,9 @@ class SQLiteRepository:
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             self._connection.execute(
                 """
-                INSERT INTO chat_sessions (id, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO chat_sessions
+                    (id, title, created_at, updated_at, status, archived_at)
+                VALUES (?, ?, ?, ?, 'active', NULL)
                 """,
                 (
                     session.id,
@@ -135,6 +138,94 @@ class SQLiteRepository:
                 ),
             )
         return session
+
+    def get_session(self, session_id: str) -> ChatSession | None:
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            return _session_from_row(row) if row is not None else None
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]:
+        _validate_session_listing(status, limit, offset)
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE status = ?
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (status, limit, offset),
+            ).fetchall()
+            return tuple(_session_from_row(row) for row in rows)
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession:
+        normalized_title = _normalize_session_title(title)
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown session: {session_id}")
+            updated_at = _utc_now()
+            self._connection.execute(
+                "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (normalized_title, _datetime_text(updated_at), session_id),
+            )
+            return _session_from_row(
+                self._connection.execute(
+                    "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+            )
+
+    def archive_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                return False
+            archived_at = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE chat_sessions
+                SET status = 'archived', archived_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_datetime_text(archived_at), _datetime_text(archived_at), session_id),
+            )
+            return True
+
+    def restore_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None or row["status"] != "archived":
+                return False
+            restored_at = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE chat_sessions
+                SET status = 'active', archived_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (_datetime_text(restored_at), session_id),
+            )
+            return True
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                "DELETE FROM chat_sessions WHERE id = ?", (session_id,)
+            )
+            return cursor.rowcount == 1
 
     def append_message(
         self,
@@ -156,11 +247,13 @@ class SQLiteRepository:
         created_at = _utc_now()
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             session = self._connection.execute(
-                "SELECT id FROM chat_sessions WHERE id = ?",
+                "SELECT id, status, title FROM chat_sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if session is None:
                 raise KeyError(f"unknown session: {session_id}")
+            if session["status"] == "archived":
+                raise SessionArchivedError(f"session is archived: {session_id}")
             cursor = self._connection.execute(
                 """
                 INSERT INTO chat_messages
@@ -175,9 +268,12 @@ class SQLiteRepository:
                     _datetime_text(created_at),
                 ),
             )
+            title = session["title"]
+            if role == "user" and title is None:
+                title = _title_from_user_message(content)
             self._connection.execute(
-                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                (_datetime_text(created_at), session_id),
+                "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (title, _datetime_text(created_at), session_id),
             )
             message_id = int(cursor.lastrowid)
         return ChatMessage(
@@ -498,6 +594,21 @@ def _preferences_from_row(row: sqlite3.Row) -> UserPreferences:
     )
 
 
+def _session_from_row(row: sqlite3.Row) -> ChatSession:
+    return ChatSession(
+        id=row["id"],
+        title=row["title"],
+        created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+        status=row["status"],
+        archived_at=(
+            _parse_datetime(row["archived_at"])
+            if row["archived_at"] is not None
+            else None
+        ),
+    )
+
+
 def _message_from_row(row: sqlite3.Row) -> ChatMessage:
     return ChatMessage(
         id=int(row["id"]),
@@ -611,6 +722,33 @@ def _load_json_array(value: str, field_name: str) -> list[str]:
     if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
         raise ValueError(f"stored {field_name} must be a JSON string array")
     return decoded
+
+
+def _validate_session_listing(
+    status: SessionStatus,
+    limit: int,
+    offset: int,
+) -> None:
+    if status not in {"active", "archived"}:
+        raise ValueError("status must be active or archived")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+
+
+def _normalize_session_title(title: str) -> str:
+    if not isinstance(title, str):
+        raise TypeError("title must be a string")
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("title must not be empty")
+    return normalized
+
+
+def _title_from_user_message(content: str) -> str | None:
+    normalized = " ".join(content.split())
+    return normalized[:80] or None
 
 
 def _pending_placeholder_path(report_id: int) -> str:
