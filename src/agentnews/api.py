@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import logging
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,10 +26,15 @@ from .services.chat import ChatAgentError, ChatService, ChatSessionNotFoundError
 from .services.digest import (
     DigestConfigurationError,
     DigestError,
+    DigestIncompleteRunError,
     DigestNoSourcesError,
+    DigestStorageError,
     DigestPreferences,
     DigestService,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -201,13 +207,33 @@ def create_app(
                 "status": "no_results",
                 "message": "没有可靠来源，未生成日报。",
             }
-        except DigestError:
+        except DigestIncompleteRunError:
+            logger.warning("日报任务未完成：工具调用达到上限")
+            raise ApiError(
+                502,
+                "digest_incomplete",
+                "日报任务未完成，工具调用达到上限，请稍后重试。",
+            ) from None
+        except DigestStorageError:
+            logger.warning("日报任务失败：报告或来源归档保存失败")
+            raise ApiError(
+                502,
+                "digest_storage_error",
+                "日报保存失败，请检查报告目录权限后重试。",
+            ) from None
+        except DigestError as error:
+            logger.warning(
+                "日报任务失败 error_type=%s message=%s",
+                type(error).__name__,
+                str(error),
+            )
             raise ApiError(
                 502,
                 "digest_error",
                 "日报任务执行失败，请稍后重试。",
             ) from None
-        except Exception:
+        except Exception as error:
+            logger.exception("日报任务发生未预期异常 error_type=%s", type(error).__name__)
             raise ApiError(
                 502,
                 "digest_error",

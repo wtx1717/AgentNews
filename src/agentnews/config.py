@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     deepseek_model: str | None = None
     deepseek_timeout: float = Field(default=30.0, gt=0)
     deepseek_max_retries: int = Field(default=2, ge=0, le=10)
-    agent_max_tool_calls: int = Field(default=8, ge=1, le=32)
+    agent_max_tool_calls: int = Field(default=16, ge=1, le=32)
     mcp_search_server_url: AnyHttpUrl | None = None
     mcp_search_api_key: SecretStr | None = None
     mcp_search_timeout: float = Field(default=20.0, gt=0)
