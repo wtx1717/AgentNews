@@ -51,7 +51,8 @@ Never commit `.env` or paste credentials into chat; `.env` is ignored by Git.
    endpoint `https://mcp.tavily.com/mcp`，只有使用其他兼容服务时才需要改；
    `MCP_SEARCH_TIMEOUT` 默认为 20 秒。不要把 key 放入 URL、代码或聊天。
 4. 启用邮件时填写 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、
-   `SMTP_PASSWORD` 和 `SMTP_FROM`。默认端口为 `587`。
+   `SMTP_PASSWORD` 和 `SMTP_FROM`。默认使用 `587` + STARTTLS；使用
+   `465` 隐式 TLS 时，将 `SMTP_USE_SSL=true`。
 5. `APP_TIMEZONE`、`REPORT_ROOT` 和 `SQLITE_PATH` 可先保留示例默认值。
 6. 运行 `uv sync` 和 `uv run pytest`。不要把 `.env` 提交到 Git。
 

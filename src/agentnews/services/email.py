@@ -65,6 +65,7 @@ class EmailService:
         *,
         settings: Settings | None = None,
         smtp_factory: Callable[..., Any] | None = None,
+        smtp_ssl_factory: Callable[..., Any] | None = None,
         sleeper: Callable[[float], None] | None = None,
         timeout: float = 10.0,
     ) -> None:
@@ -72,6 +73,9 @@ class EmailService:
         self.report_storage = report_storage
         self.settings = settings or get_settings()
         self.smtp_factory = smtp_factory or smtplib.SMTP
+        self.smtp_ssl_factory = smtp_ssl_factory or (
+            smtp_factory if smtp_factory is not None else smtplib.SMTP_SSL
+        )
         self.sleeper = sleeper or time.sleep
         self.timeout = timeout
 
@@ -205,9 +209,17 @@ class EmailService:
     ) -> None:
         client = None
         try:
-            client = self.smtp_factory(host, port, timeout=self.timeout)
-            client.ehlo()
-            client.starttls(context=ssl.create_default_context())
+            if self.settings.smtp_use_ssl:
+                client = self.smtp_ssl_factory(
+                    host,
+                    port,
+                    timeout=self.timeout,
+                    context=ssl.create_default_context(),
+                )
+            else:
+                client = self.smtp_factory(host, port, timeout=self.timeout)
+                client.ehlo()
+                client.starttls(context=ssl.create_default_context())
             client.ehlo()
             client.login(username, password)
             refused = client.send_message(message, to_addrs=[recipient])

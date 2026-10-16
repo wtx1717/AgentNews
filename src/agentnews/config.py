@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     mcp_search_timeout: float = Field(default=20.0, gt=0)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_use_ssl: bool = False
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None
