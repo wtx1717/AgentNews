@@ -131,24 +131,27 @@ class BashExecutor:
                 duration_ms=0,
                 error_code="working_directory_unavailable",
             )
-        if self.process_factory is None and shutil.which(self.executable) is None:
-            return BashExecutionResult(
-                ok=False,
-                command=command,
-                stdout="",
-                stderr="",
-                exit_code=None,
-                timed_out=False,
-                truncated=False,
-                duration_ms=0,
-                error_code="powershell_unavailable",
-            )
+        launch_executable = self.executable
+        if self.process_factory is None:
+            launch_executable = _find_pwsh(self.executable)
+            if launch_executable is None:
+                return BashExecutionResult(
+                    ok=False,
+                    command=command,
+                    stdout="",
+                    stderr="",
+                    exit_code=None,
+                    timed_out=False,
+                    truncated=False,
+                    duration_ms=0,
+                    error_code="powershell_unavailable",
+                )
 
         started = time.perf_counter()
         try:
             factory = self.process_factory or asyncio.create_subprocess_exec
             process = await factory(
-                self.executable,
+                launch_executable,
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
@@ -250,7 +253,14 @@ def create_bash_tool(
         description=(
             "Request a PowerShell 7 command when the other tools cannot complete the task. "
             "The user must approve every call before it executes. Include a concise, "
-            "user-facing explanation of the command's purpose."
+            "user-facing explanation of the command's purpose. The working directory is "
+            "the AgentNews project root. For report operations, prefer these built-in "
+            "actions instead of raw Remove-Item: `agentnews reports list`, "
+            "`agentnews reports read --id <positive integer>`, "
+            "`agentnews reports search --keyword <text>`, "
+            "`agentnews reports delete --id <positive integer>`, and "
+            "`agentnews temp cleanup`. The report delete action also removes the "
+            "database record and associated source archives through ReportService."
         ),
         args_schema=BashInput,
         handle_validation_error=_handle_validation_error,
@@ -275,3 +285,37 @@ def _json(value: Any) -> str:
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _find_pwsh(executable: str) -> str | None:
+    """Resolve PowerShell 7 without silently falling back to Windows PowerShell."""
+    resolved = shutil.which(executable)
+    if resolved:
+        return resolved
+
+    candidate = Path(executable).expanduser()
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        return str(candidate) if candidate.is_file() else None
+
+    if os.name != "nt":
+        return None
+
+    roots = [
+        os.environ.get("ProgramW6432"),
+        os.environ.get("ProgramFiles"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+    candidates = [
+        Path(root) / "PowerShell" / "7" / "pwsh.exe"
+        for root in roots
+        if root
+    ]
+    candidates.extend(
+        Path(root) / "Microsoft" / "PowerShell" / "7" / "pwsh.exe"
+        for root in roots
+        if root
+    )
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None

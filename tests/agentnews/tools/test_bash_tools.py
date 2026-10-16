@@ -42,6 +42,13 @@ def test_bash_schema_is_strict_and_explanation_is_required():
     assert extra["error"]["code"] == "invalid_arguments"
 
 
+def test_bash_description_prioritizes_report_actions():
+    tool = create_bash_tool(lambda _command, _explanation: asyncio.sleep(0, result='{"ok":true}'))
+
+    assert "agentnews reports delete --id" in tool.description
+    assert "ReportService" in tool.description
+
+
 def test_executor_uses_fixed_process_boundary_and_bounded_output(tmp_path):
     calls = {}
 
