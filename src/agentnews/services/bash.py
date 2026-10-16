@@ -361,11 +361,13 @@ class ChatRunManager:
         chat_service: ChatService,
         bash_service: BashService,
         *,
+        digest_handler: Callable[[str, str], Any] | None = None,
         approval_timeout_seconds: float = APPROVAL_TIMEOUT_SECONDS,
     ) -> None:
         self.repository = repository
         self.chat_service = chat_service
         self.bash_service = bash_service
+        self.digest_handler = digest_handler
         if approval_timeout_seconds <= 0:
             raise ValueError("approval_timeout_seconds must be positive")
         self.approval_timeout_seconds = float(approval_timeout_seconds)
@@ -399,11 +401,16 @@ class ChatRunManager:
             return await self._request_approval(record, command, explanation)
 
         try:
+            run_kwargs: dict[str, Any] = {
+                "bash_approval_handler": bash_handler,
+                "run_id": record.id,
+            }
+            if self.digest_handler is not None:
+                run_kwargs["digest_handler"] = self.digest_handler
             record.result = await self.chat_service.run(
                 message,
                 record.session_id,
-                bash_approval_handler=bash_handler,
-                run_id=record.id,
+                **run_kwargs,
             )
             if record.status != "expired":
                 record.status = "completed"

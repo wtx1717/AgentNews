@@ -20,6 +20,7 @@ from .bash import (
     BashInput,
     create_bash_tool,
 )
+from .digest import GenerateDigestInput, create_digest_tool
 from .registry import (
     ListDirInput,
     ReadFileInput,
@@ -88,6 +89,8 @@ __all__ = [
     "WriteFileInput",
     "create_local_file_tools",
     "create_bash_tool",
+    "GenerateDigestInput",
+    "create_digest_tool",
     "list_dir",
     "read_file",
     "search_content",

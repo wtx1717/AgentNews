@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import inspect
+import json
 from typing import Any
 
 from ..agent import AgentRunResult, AgentRunner, create_agent_runner
@@ -58,6 +59,7 @@ class ChatService:
         session_id: str | None = None,
         *,
         bash_approval_handler: Callable[[str, str], Any] | None = None,
+        digest_handler: Callable[[str, str], Any] | None = None,
         run_id: str | None = None,
     ) -> ChatResult:
         if not isinstance(message, str) or not message.strip():
@@ -91,6 +93,10 @@ class ChatService:
                 runner.ainvoke, "bash_approval_handler"
             ):
                 invoke_kwargs["bash_approval_handler"] = bash_approval_handler
+            if digest_handler is not None and _accepts_keyword(
+                runner.ainvoke, "digest_handler"
+            ):
+                invoke_kwargs["digest_handler"] = digest_handler
             run = await runner.ainvoke(normalized_message, **invoke_kwargs)
             if not isinstance(run, AgentRunResult):
                 raise TypeError("invalid agent result")
@@ -118,6 +124,7 @@ class ChatService:
             session_id=active_session_id,
             answer=answer,
             tool_calls=run.tool_calls,
+            report_ids=_extract_report_ids(run),
         )
 
 
@@ -139,3 +146,20 @@ def _accepts_keyword(function: Any, name: str) -> bool:
         parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
         for parameter in parameters
     )
+
+
+def _extract_report_ids(run: AgentRunResult) -> tuple[int, ...]:
+    """Expose successful digest IDs without deciding which tools the model calls."""
+    report_ids: list[int] = []
+    for record in run.tool_call_records:
+        if record.name != "generate_digest":
+            continue
+        try:
+            payload = json.loads(record.result)
+            report_id = payload.get("result", {}).get("report_id")
+        except (TypeError, json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(report_id, int) and not isinstance(report_id, bool) and report_id > 0:
+            if report_id not in report_ids:
+                report_ids.append(report_id)
+    return tuple(report_ids)

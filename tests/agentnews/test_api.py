@@ -111,6 +111,42 @@ def test_chat_settings_health_and_session_context(tmp_path):
     assert "API_KEY" not in health.text
 
 
+def test_chat_exposes_one_digest_tool_call_to_the_model(tmp_path):
+    class DigestRunner:
+        async def ainvoke(self, prompt, *, task_context=None, bash_approval_handler=None, digest_handler=None):
+            assert digest_handler is not None
+            tool_result = await digest_handler("比亚迪", "专利")
+            return AgentRunResult(tool_result, 1, "completed")
+
+    digest = FakeDigestService(
+        DigestResult(
+            report_id=1,
+            report_path="2026-10-16/1-2026-10-16-新闻日报.md",
+            source_archive_paths=(),
+            tool_calls=2,
+            final_text="日报正文",
+        )
+    )
+    repository = InMemoryRepository()
+    client = TestClient(
+        create_app(
+            repository,
+            agent_runner=DigestRunner(),
+            digest_service=digest,
+            settings=_settings(tmp_path),
+        )
+    )
+
+    response = client.post("/api/chat", json={"message": "生成一份比亚迪专利日报"})
+
+    assert response.status_code == 200
+    assert '"report_id":1' in response.json()["answer"]
+    assert len(digest.calls) == 1
+    preferences, _business_date = digest.calls[0]
+    assert preferences.topics == ("比亚迪",)
+    assert preferences.keywords == ("专利",)
+
+
 def test_default_sqlite_application_persists_across_instances(tmp_path):
     settings = _settings(tmp_path)
     first_runner = FakeRunner(AgentRunResult("第一条", 0, "completed"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -126,7 +127,6 @@ def create_app(
         temp_root=app_settings.temp_root,
         working_directory=Path.cwd(),
     )
-    chat_run_manager = ChatRunManager(app_repository, chat_service, bash_service)
     resolved_digest_service = digest_service
 
     def get_digest_service() -> DigestService:
@@ -141,6 +141,69 @@ def create_app(
             )
         return resolved_digest_service
 
+    async def generate_digest_for_agent(topic: str, keyword: str) -> str:
+        """Run one explicit digest requested by the conversational Agent."""
+        preferences = app_repository.get_preferences()
+        try:
+            business_date = datetime.now(ZoneInfo(preferences.timezone)).date()
+            result = await get_digest_service().run_once(
+                DigestPreferences(
+                    topics=(topic,),
+                    keywords=(keyword,),
+                    timezone=preferences.timezone,
+                ),
+                business_date,
+            )
+        except DigestConfigurationError:
+            return _json_tool_error(
+                "invalid_digest_preferences",
+                "日报主题或关键词无效，未生成日报。",
+            )
+        except DigestNoSourcesError:
+            return _json_tool_error("no_sources", "没有可靠来源，未生成日报。")
+        except DigestIncompleteRunError:
+            return _json_tool_error(
+                "digest_incomplete",
+                "日报搜索或抓取流程未完成，未保存日报。",
+            )
+        except DigestStorageError:
+            return _json_tool_error(
+                "digest_storage_error",
+                "日报保存失败，未确认生成成功。",
+            )
+        except DigestError:
+            return _json_tool_error(
+                "digest_error",
+                "日报流程执行失败，未确认生成成功。",
+            )
+        except Exception:
+            logger.exception("Agent 请求日报生成失败")
+            return _json_tool_error(
+                "digest_error",
+                "日报流程执行失败，未确认生成成功。",
+            )
+
+        report = app_repository.get_report(result.report_id)
+        return _json_result(
+            {
+                "ok": True,
+                "result": {
+                    "report_id": result.report_id,
+                    "title": report.title if report is not None else None,
+                    "report_path": result.report_path,
+                    "source_count": len(app_repository.get_report_sources(result.report_id)),
+                    "source_archive_paths": list(result.source_archive_paths),
+                    "tool_calls": result.tool_calls,
+                },
+            }
+        )
+
+    chat_run_manager = ChatRunManager(
+        app_repository,
+        chat_service,
+        bash_service,
+        digest_handler=generate_digest_for_agent,
+    )
     app = FastAPI(title="AgentNews API", version="0.1.0")
     static_root = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_root), name="static")
@@ -547,6 +610,14 @@ def _source_to_dict(source: Any) -> dict[str, Any]:
         "snippet": source.snippet,
         "archive_path": source.archive_file_path,
     }
+
+
+def _json_result(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_tool_error(code: str, message: str) -> str:
+    return _json_result({"ok": False, "error": {"code": code, "message": message}})
 
 
 def _raise_chat_run_error(run: Any) -> None:

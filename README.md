@@ -95,6 +95,7 @@ uv run pytest
 - `src/agentnews/agent/runner.py`: async and sync LangChain tool-calling runner.
 - `src/agentnews/tools/bash.py`: project-owned PowerShell executor and schema.
 - `src/agentnews/services/bash.py`: approval state machine, audit events, and report actions.
+- `src/agentnews/tools/digest.py`: the structured `generate_digest` tool for one digest per call.
 - `src/agentnews/tools/mcp_client.py`: async MCP client that discovers and invokes every published service tool.
 - `src/agentnews/tools/tavily_mcp.py`: compatibility adapter for the legacy Tavily search API.
 - `src/agentnews/repositories/`: report file storage and persistence adapters.
@@ -136,3 +137,12 @@ fully capable of bypassing that service by design; use the application action
 when report consistency is required. Each command has a 60-second timeout, no
 stdin, and a 1 MiB combined output limit. Pending approvals are held in memory
 for five minutes and are discarded when the application restarts.
+
+## Conversational digest generation
+
+Ordinary chat exposes `generate_digest(topic, keyword)` as a structured tool.
+Each call runs the existing `DigestService` search, fetch, Markdown, source
+archive, and database-index workflow for one report. The model decides whether
+the request needs one call or several calls and supplies the parameters for
+each call; the application does not parse natural language or impose a fixed
+number or order of reports. Bash is not used for digest generation.
