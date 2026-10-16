@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from ..agent import AgentRunResult, AgentRunner, create_agent_runner
@@ -51,7 +52,14 @@ class ChatService:
             self._agent_runner = self._runner_factory()
         return self._agent_runner
 
-    async def run(self, message: str, session_id: str | None = None) -> ChatResult:
+    async def run(
+        self,
+        message: str,
+        session_id: str | None = None,
+        *,
+        bash_approval_handler: Callable[[str, str], Any] | None = None,
+        run_id: str | None = None,
+    ) -> ChatResult:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("message must not be empty")
         normalized_message = message.strip()
@@ -77,10 +85,13 @@ class ChatService:
         except SessionArchivedError:
             raise ChatSessionArchivedError("会话已归档，请先恢复") from None
         try:
-            run = await self.get_agent_runner().ainvoke(
-                normalized_message,
-                task_context=context or None,
-            )
+            runner = self.get_agent_runner()
+            invoke_kwargs: dict[str, Any] = {"task_context": context or None}
+            if bash_approval_handler is not None and _accepts_keyword(
+                runner.ainvoke, "bash_approval_handler"
+            ):
+                invoke_kwargs["bash_approval_handler"] = bash_approval_handler
+            run = await runner.ainvoke(normalized_message, **invoke_kwargs)
             if not isinstance(run, AgentRunResult):
                 raise TypeError("invalid agent result")
             answer = run.text.strip()
@@ -117,3 +128,14 @@ def _render_history(messages: Sequence[ChatMessage]) -> str:
             continue
         lines.append(f"{message.role}: {message.content}")
     return "\n".join(lines)
+
+
+def _accepts_keyword(function: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+        for parameter in parameters
+    )

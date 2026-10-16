@@ -7,6 +7,9 @@ const state = {
   sessionView: "active",
   sessionRequest: 0,
   sessionBusy: false,
+  pendingRunId: null,
+  pendingApprovalId: null,
+  runPoller: null,
   reportOffset: 0,
   reportLimit: 10,
   selectedReportId: null,
@@ -27,6 +30,16 @@ const elements = {
   chatError: document.querySelector("#chat-error"),
   toolCalls: document.querySelector("#tool-call-count"),
   chatSession: document.querySelector("#chat-session-label"),
+  bashDialog: document.querySelector("#bash-approval-dialog"),
+  bashExplanation: document.querySelector("#bash-approval-explanation"),
+  bashRisk: document.querySelector("#bash-approval-risk"),
+  bashCommand: document.querySelector("#bash-approval-command"),
+  bashCwd: document.querySelector("#bash-approval-cwd"),
+  bashTimeout: document.querySelector("#bash-approval-timeout"),
+  bashOutput: document.querySelector("#bash-approval-output"),
+  bashError: document.querySelector("#bash-approval-error"),
+  bashApprove: document.querySelector("#bash-approve"),
+  bashReject: document.querySelector("#bash-reject"),
   preferencesForm: document.querySelector("#preferences-form"),
   preferencesStatus: document.querySelector("#preferences-status"),
   preferencesError: document.querySelector("#preferences-error"),
@@ -56,6 +69,7 @@ function setStatus(element, status, message) {
   const labels = {
     idle: "尚未执行",
     running: "执行中",
+    pending_approval: "等待人工审核",
     completed: "完成",
     no_results: "无结果",
     failed: "失败",
@@ -67,6 +81,107 @@ function setStatus(element, status, message) {
 function setError(element, message) {
   element.textContent = message || "";
   element.hidden = !message;
+}
+
+function renderBashApproval(approval) {
+  state.pendingApprovalId = approval?.id || null;
+  elements.bashExplanation.textContent = approval?.explanation || "模型未提供执行说明。";
+  elements.bashRisk.textContent = approval?.risk_summary || "批准后命令将在当前用户权限下执行。";
+  elements.bashCommand.textContent = approval?.command || "";
+  elements.bashCwd.textContent = approval?.working_directory || "";
+  elements.bashTimeout.textContent = `${approval?.timeout_seconds ?? 60} 秒`;
+  elements.bashOutput.textContent = `${approval?.output_limit_bytes ?? 1048576} 字节`;
+  setError(elements.bashError, "");
+  elements.bashApprove.disabled = false;
+  elements.bashReject.disabled = false;
+  if (!elements.bashDialog.open) elements.bashDialog.showModal();
+}
+
+function closeBashApproval() {
+  if (elements.bashDialog.open) elements.bashDialog.close();
+  state.pendingApprovalId = null;
+  setError(elements.bashError, "");
+}
+
+function stopRunPolling() {
+  if (state.runPoller !== null) {
+    window.clearInterval(state.runPoller);
+    state.runPoller = null;
+  }
+}
+
+async function finishChatRun(snapshot) {
+  stopRunPolling();
+  state.pendingRunId = null;
+  closeBashApproval();
+  if (snapshot.status === "completed") {
+    const result = snapshot.result || {};
+    await loadSessionDetail(result.session_id || snapshot.session_id);
+    await loadSessions("active");
+    elements.toolCalls.textContent = String(result.tool_calls ?? 0);
+    setStatus(elements.chatStatus, "completed");
+  } else {
+    setStatus(elements.chatStatus, "failed");
+    setError(elements.chatError, snapshot.error?.message || "Agent 运行失败，请稍后重试。")
+  }
+  setSessionBusy(false);
+  elements.chatInput.focus();
+}
+
+async function handleChatRunSnapshot(snapshot) {
+  if (snapshot.status === "pending_approval" && snapshot.approval) {
+    state.pendingRunId = snapshot.run_id;
+    setStatus(elements.chatStatus, "pending_approval");
+    renderBashApproval(snapshot.approval);
+    return;
+  }
+  if (snapshot.status === "running") {
+    closeBashApproval();
+    setStatus(elements.chatStatus, "running");
+    return;
+  }
+  if (["completed", "failed", "expired"].includes(snapshot.status)) {
+    await finishChatRun(snapshot);
+  }
+}
+
+async function pollChatRun() {
+  if (!state.pendingRunId) return;
+  try {
+    const snapshot = await request(`/api/chat/runs/${encodeURIComponent(state.pendingRunId)}`);
+    await handleChatRunSnapshot(snapshot);
+  } catch (error) {
+    stopRunPolling();
+    closeBashApproval();
+    setStatus(elements.chatStatus, "failed");
+    setError(elements.chatError, error.message);
+    state.pendingRunId = null;
+    setSessionBusy(false);
+  }
+}
+
+function startRunPolling() {
+  stopRunPolling();
+  state.runPoller = window.setInterval(pollChatRun, 600);
+}
+
+async function submitBashApproval(decision) {
+  if (!state.pendingRunId || !state.pendingApprovalId) return;
+  elements.bashApprove.disabled = true;
+  elements.bashReject.disabled = true;
+  setError(elements.bashError, "");
+  try {
+    const snapshot = await request(
+      `/api/chat/runs/${encodeURIComponent(state.pendingRunId)}/approvals/${encodeURIComponent(state.pendingApprovalId)}`,
+      { method: "POST", body: JSON.stringify({ decision }) },
+    );
+    await handleChatRunSnapshot(snapshot);
+    if (snapshot.status === "running" || snapshot.status === "pending_approval") startRunPolling();
+  } catch (error) {
+    setError(elements.bashError, error.message);
+    elements.bashApprove.disabled = false;
+    elements.bashReject.disabled = false;
+  }
 }
 
 async function request(path, options = {}) {
@@ -414,22 +529,29 @@ async function sendChat(event) {
   setStatus(elements.chatStatus, "running");
   appendMessage("user", message);
   elements.chatInput.value = "";
+  let pendingApproval = false;
   try {
     const result = await request("/api/chat", {
       method: "POST",
       body: JSON.stringify({ session_id: requestSessionId, message }),
     });
-    await loadSessionDetail(result.session_id);
-    await loadSessions("active");
-    elements.toolCalls.textContent = String(result.tool_calls ?? 0);
-    setStatus(elements.chatStatus, "completed");
+    if (result.status === "pending_approval") {
+      pendingApproval = true;
+      state.pendingRunId = result.run_id;
+      await handleChatRunSnapshot(result);
+      startRunPolling();
+    } else {
+      await finishChatRun({ status: "completed", result });
+    }
   } catch (error) {
     setStatus(elements.chatStatus, "failed");
     setError(elements.chatError, error.message);
   } finally {
-    button.disabled = false;
-    setSessionBusy(false);
-    elements.chatInput.focus();
+    if (!pendingApproval) {
+      button.disabled = false;
+      setSessionBusy(false);
+      elements.chatInput.focus();
+    }
   }
 }
 
@@ -633,6 +755,9 @@ elements.restoreCurrent.addEventListener("click", async () => {
 });
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.chatForm.addEventListener("submit", sendChat);
+elements.bashApprove.addEventListener("click", () => submitBashApproval("approve"));
+elements.bashReject.addEventListener("click", () => submitBashApproval("reject"));
+elements.bashDialog.addEventListener("cancel", (event) => event.preventDefault());
 elements.digestButton.addEventListener("click", runDigest);
 elements.refreshReports.addEventListener("click", () => loadReports({ reset: true }));
 elements.loadMore.addEventListener("click", () => loadReports());

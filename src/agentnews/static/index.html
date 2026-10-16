@@ -195,6 +195,29 @@
       </section>
     </main>
 
+    <dialog id="bash-approval-dialog" class="bash-approval-dialog" aria-labelledby="bash-approval-title">
+      <form method="dialog" class="bash-approval-card">
+        <p class="eyebrow">人工审核</p>
+        <h2 id="bash-approval-title">Agent 请求执行 Bash</h2>
+        <p id="bash-approval-explanation" class="bash-approval-explanation"></p>
+        <div class="bash-approval-warning">
+          <strong>高权限操作</strong>
+          <span id="bash-approval-risk"></span>
+        </div>
+        <pre id="bash-approval-command" class="bash-command"></pre>
+        <dl class="bash-approval-meta">
+          <div><dt>工作目录</dt><dd id="bash-approval-cwd"></dd></div>
+          <div><dt>超时</dt><dd id="bash-approval-timeout"></dd></div>
+          <div><dt>输出上限</dt><dd id="bash-approval-output"></dd></div>
+        </dl>
+        <p id="bash-approval-error" class="error-message" role="alert" hidden></p>
+        <div class="bash-approval-actions">
+          <button id="bash-reject" class="button button-secondary" type="button">拒绝</button>
+          <button id="bash-approve" class="button button-accent" type="button">批准执行</button>
+        </div>
+      </form>
+    </dialog>
+
     <footer class="page-footer">AgentNews <span aria-hidden="true">·</span> 静态工作台</footer>
   </body>
 </html>

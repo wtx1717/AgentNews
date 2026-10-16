@@ -47,6 +47,8 @@ def test_prompts_define_tool_search_write_and_reliability_rules():
     assert "信息不足" in research
     assert "写入文件" in interaction
     assert "先向用户确认" in interaction
+    assert "前端审核弹窗是唯一的执行确认步骤" in interaction
+    assert "不要先询问“是否执行”" in interaction
     assert "新文件可以创建" in digest
     assert "不得覆盖" in digest
     assert "真实来源 URL" in digest

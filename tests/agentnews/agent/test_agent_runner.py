@@ -60,6 +60,40 @@ def test_direct_answer_does_not_initialize_search(monkeypatch):
     }
 
 
+def test_bash_is_registered_only_with_approval_handler():
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "bash",
+                        {"command": "Write-Output test", "explanation": "执行测试命令"},
+                        "bash-1",
+                    )
+                ],
+            ),
+            AIMessage(content="已完成"),
+        ]
+    )
+    approvals = []
+
+    async def approval_handler(command, explanation):
+        approvals.append((command, explanation))
+        return '{"ok":true}'
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke(
+            "执行命令",
+            bash_approval_handler=approval_handler,
+        )
+    )
+
+    assert result.text == "已完成"
+    assert "bash" in {tool.name for tool in model.tools}
+    assert approvals == [("Write-Output test", "执行测试命令")]
+
+
 def test_file_tool_result_is_returned_to_model(tmp_path):
     data_root = tmp_path / "data"
     data_root.mkdir()

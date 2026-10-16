@@ -40,6 +40,7 @@ from .services.digest import (
     DigestService,
 )
 from .services.report import ReportDeletionError, ReportService
+from .services.bash import ChatRunBusyError, ChatRunManager, BashService
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,10 @@ class SessionTitlePayload(_StrictModel):
         return normalized
 
 
+class BashApprovalPayload(_StrictModel):
+    decision: Literal["approve", "reject"]
+
+
 def create_app(
     repository: RepositoryProtocol | None = None,
     *,
@@ -113,6 +118,15 @@ def create_app(
         app_repository, report_storage, source_archive_storage
     )
     chat_service = ChatService(app_repository, agent_runner=agent_runner)
+    bash_service = BashService(
+        app_repository,
+        report_service,
+        report_storage,
+        source_archive_storage,
+        temp_root=app_settings.temp_root,
+        working_directory=Path.cwd(),
+    )
+    chat_run_manager = ChatRunManager(app_repository, chat_service, bash_service)
     resolved_digest_service = digest_service
 
     def get_digest_service() -> DigestService:
@@ -132,6 +146,8 @@ def create_app(
     app.mount("/static", StaticFiles(directory=static_root), name="static")
     app.state.repository = app_repository
     app.state.chat_service = chat_service
+    app.state.bash_service = bash_service
+    app.state.chat_run_manager = chat_run_manager
     app.state.settings = app_settings
 
     @app.get("/", include_in_schema=False)
@@ -172,13 +188,15 @@ def create_app(
         )
 
     @app.post("/api/chat")
-    async def chat(payload: ChatRequest) -> dict[str, Any]:
+    async def chat(payload: ChatRequest) -> Response:
         try:
-            result = await chat_service.run(payload.message, payload.session_id)
+            run = await chat_run_manager.start(payload.message, payload.session_id)
         except ChatSessionNotFoundError as error:
             raise ApiError(404, "session_not_found", str(error)) from None
         except ChatSessionArchivedError as error:
             raise ApiError(409, "session_archived", str(error)) from None
+        except ChatRunBusyError as error:
+            raise ApiError(409, "run_busy", str(error)) from None
         except ChatAgentError:
             raise ApiError(
                 502,
@@ -187,12 +205,37 @@ def create_app(
             ) from None
         except ValueError:
             raise ApiError(422, "validation_error", "请求参数无效") from None
-        return {
-            "session_id": result.session_id,
-            "answer": result.answer,
-            "tool_calls": result.tool_calls,
-            "report_ids": list(result.report_ids),
-        }
+        snapshot = chat_run_manager.snapshot(run.id)
+        assert snapshot is not None
+        if run.status == "pending_approval":
+            return JSONResponse(status_code=202, content=snapshot)
+        if run.status == "completed":
+            return JSONResponse(status_code=200, content=snapshot["result"])
+        _raise_chat_run_error(run)
+        raise AssertionError("unreachable")
+
+    @app.get("/api/chat/runs/{run_id}")
+    async def get_chat_run(run_id: str) -> dict[str, Any]:
+        snapshot = chat_run_manager.snapshot(run_id)
+        if snapshot is None:
+            raise ApiError(404, "run_not_found", "Agent 运行不存在或已过期")
+        return snapshot
+
+    @app.post("/api/chat/runs/{run_id}/approvals/{approval_id}")
+    async def decide_bash_approval(
+        run_id: str,
+        approval_id: str,
+        payload: BashApprovalPayload,
+    ) -> Response:
+        try:
+            run = await chat_run_manager.decide(run_id, approval_id, payload.decision)
+        except KeyError:
+            raise ApiError(404, "approval_not_found", "审核请求不存在") from None
+        except RuntimeError:
+            raise ApiError(409, "approval_unavailable", "审核请求已处理或已失效") from None
+        snapshot = chat_run_manager.snapshot(run.id)
+        assert snapshot is not None
+        return JSONResponse(status_code=202, content=snapshot)
 
     @app.post("/api/sessions")
     async def create_session() -> dict[str, Any]:
@@ -504,6 +547,17 @@ def _source_to_dict(source: Any) -> dict[str, Any]:
         "snippet": source.snippet,
         "archive_path": source.archive_file_path,
     }
+
+
+def _raise_chat_run_error(run: Any) -> None:
+    error = getattr(run, "error", None)
+    if getattr(run, "status", None) == "expired":
+        raise ApiError(409, "approval_expired", "Bash 审核已过期")
+    if isinstance(error, ChatSessionNotFoundError):
+        raise ApiError(404, "session_not_found", str(error))
+    if isinstance(error, ChatSessionArchivedError):
+        raise ApiError(409, "session_archived", str(error))
+    raise ApiError(502, "agent_error", "Agent 暂时无法处理该请求，请稍后重试。")
 
 
 app = create_app()

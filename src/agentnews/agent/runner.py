@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -22,6 +22,7 @@ from ..tools import (
     MCPToolArgumentError,
     MCPUnavailableError,
     OnlineSearchResult,
+    create_bash_tool,
     create_local_file_tools,
 )
 from ..tools.path_security import ManagedPathResolver
@@ -75,12 +76,14 @@ class AgentRunner:
         resolver: ManagedPathResolver | None = None,
         mcp_client_factory: Callable[[Settings], Any] | None = None,
         search_client_factory: Callable[[Settings], Any] | None = None,
+        bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.model = model if model is not None else create_deepseek_model(self.settings)
         self.resolver = resolver
         self.mcp_client_factory = mcp_client_factory or MCPClient
         self.search_client_factory = search_client_factory
+        self.bash_approval_handler = bash_approval_handler
 
     async def ainvoke(
         self,
@@ -88,6 +91,7 @@ class AgentRunner:
         *,
         system_prompt: str | None = None,
         task_context: str | None = None,
+        bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> AgentRunResult:
         """Execute one prompt and its model-selected tools asynchronously.
 
@@ -110,6 +114,9 @@ class AgentRunner:
         stack = AsyncExitStack()
         try:
             tools = create_local_file_tools(self.resolver)
+            resolved_bash_handler = bash_approval_handler or self.bash_approval_handler
+            if resolved_bash_handler is not None:
+                tools.append(create_bash_tool(resolved_bash_handler))
             mcp_configured = (
                 self.settings.mcp_search_server_url is not None
                 or self.settings.mcp_search_api_key is not None
@@ -302,6 +309,7 @@ def create_agent_runner(
     resolver: ManagedPathResolver | None = None,
     mcp_client_factory: Callable[[Settings], Any] | None = None,
     search_client_factory: Callable[[Settings], Any] | None = None,
+    bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> AgentRunner:
     """Create a configured Agent runner."""
     return AgentRunner(
@@ -310,6 +318,7 @@ def create_agent_runner(
         resolver=resolver,
         mcp_client_factory=mcp_client_factory,
         search_client_factory=search_client_factory,
+        bash_approval_handler=bash_approval_handler,
     )
 
 

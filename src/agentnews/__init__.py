@@ -40,6 +40,7 @@ from .services.chat import (
     ChatSessionNotFoundError,
 )
 from .services.report import ReportDeletionError, ReportService
+from .services.bash import BashAudit, BashService, ChatRunBusyError, ChatRunManager
 from .api import app, create_app
 
 __all__ = [
@@ -82,6 +83,10 @@ __all__ = [
     "ChatSessionNotFoundError",
     "ReportDeletionError",
     "ReportService",
+    "BashAudit",
+    "BashService",
+    "ChatRunBusyError",
+    "ChatRunManager",
     "app",
     "create_app",
 ]

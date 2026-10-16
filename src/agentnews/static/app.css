@@ -74,6 +74,8 @@ h4 { margin: 0; font-size: 13px; }
 .status::before { width: 7px; height: 7px; border-radius: 50%; background: #a8b2ad; content: ""; }
 .status-running { color: #98631c; }
 .status-running::before { background: #d9a23f; animation: pulse 1s ease-in-out infinite alternate; }
+.status-pending-approval { color: #8d531a; }
+.status-pending-approval::before { background: #d08b32; animation: pulse 1s ease-in-out infinite alternate; }
 .status-completed { color: var(--green); }
 .status-completed::before { background: #3b9b68; }
 .status-no-results { color: #94611b; }
@@ -158,6 +160,19 @@ textarea { line-height: 1.45; }
 .source-viewer .markdown-content { max-height: 600px; }
 .page-footer { width: min(1280px, calc(100% - 48px)); margin: 0 auto; padding: 19px 0 26px; color: #818b85; font-size: 10px; }
 .page-footer span { margin: 0 5px; }
+.bash-approval-dialog { width: min(620px, calc(100% - 32px)); padding: 0; border: 0; border-radius: 8px; color: var(--ink); box-shadow: 0 24px 80px #17232055; }
+.bash-approval-dialog::backdrop { background: #17232088; }
+.bash-approval-card { display: grid; gap: 13px; padding: 25px; }
+.bash-approval-card h2 { margin: 0; }
+.bash-approval-explanation { margin: 0; color: #56635c; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bash-approval-warning { display: grid; gap: 3px; padding: 10px 12px; border-left: 3px solid var(--coral); background: var(--coral-light); color: #7d382c; font-size: 12px; line-height: 1.5; }
+.bash-command { max-height: 180px; margin: 0; padding: 13px; overflow: auto; border: 1px solid #cfd8d2; border-radius: 5px; background: #172320; color: #e8f1ea; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bash-approval-meta { display: grid; gap: 6px; margin: 0; color: var(--muted); font-size: 11px; }
+.bash-approval-meta div { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px; }
+.bash-approval-meta dt { font-weight: 700; }
+.bash-approval-meta dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.bash-approval-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 4px; }
+.bash-approval-actions .button { min-width: 96px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 [hidden] { display: none !important; }
 
@@ -187,6 +202,9 @@ textarea { line-height: 1.45; }
   .source-entry { grid-template-columns: minmax(0, 1fr); }
   .source-actions { grid-column: 1; grid-row: auto; }
   .detail-meta { justify-content: flex-start; }
+  .bash-approval-card { padding: 20px; }
+  .bash-approval-actions { justify-content: stretch; }
+  .bash-approval-actions .button { flex: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

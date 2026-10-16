@@ -19,6 +19,7 @@ from .chat import (
     ChatSessionNotFoundError,
 )
 from .report import ReportDeletionError, ReportService
+from .bash import BashAudit, BashService, ChatRunBusyError, ChatRunManager
 
 __all__ = [
     "DigestConfigurationError",
@@ -37,4 +38,8 @@ __all__ = [
     "ChatSessionNotFoundError",
     "ReportDeletionError",
     "ReportService",
+    "BashAudit",
+    "BashService",
+    "ChatRunBusyError",
+    "ChatRunManager",
 ]

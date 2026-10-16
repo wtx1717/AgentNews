@@ -14,6 +14,12 @@ from .file_tools import (
     search_content,
     write_file,
 )
+from .bash import (
+    BashExecutionResult,
+    BashExecutor,
+    BashInput,
+    create_bash_tool,
+)
 from .registry import (
     ListDirInput,
     ReadFileInput,
@@ -46,6 +52,9 @@ from .tavily_mcp import (
 )
 
 __all__ = [
+    "BashExecutionResult",
+    "BashExecutor",
+    "BashInput",
     "DirectoryEntry",
     "DirectoryListing",
     "FileReadResult",
@@ -78,6 +87,7 @@ __all__ = [
     "TavilyMCPClient",
     "WriteFileInput",
     "create_local_file_tools",
+    "create_bash_tool",
     "list_dir",
     "read_file",
     "search_content",
