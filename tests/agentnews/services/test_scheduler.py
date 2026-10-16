@@ -1,5 +1,7 @@
 import asyncio
 from datetime import UTC, date, datetime
+import logging
+import sqlite3
 from types import SimpleNamespace
 
 from agentnews.repositories import InMemoryRepository, UserPreferences
@@ -112,4 +114,47 @@ def test_temporary_email_failure_retries_task_and_reuses_idempotency_key():
     assert len(digest.calls) == 1
     assert len(email.calls) == 2
     assert email.calls[0][1]["idempotency_key"] == email.calls[1][1]["idempotency_key"]
+
+
+def test_unexpected_email_exception_is_logged_with_its_traceback(caplog):
+    """An unexpected exception is recorded as ``scheduler_error``, so it must be logged.
+
+    Without this the real cause (e.g. a database constraint violation) is invisible and
+    only the opaque ``scheduler_error`` code survives.
+    """
+
+    class ExplodingEmail:
+        def send_report(self, report_id, **kwargs):
+            raise sqlite3.IntegrityError(
+                "CHECK constraint failed: trigger_source IN ('manual_api', 'natural_language')"
+            )
+
+    repository = InMemoryRepository()
+    repository.save_preferences(
+        UserPreferences(topics=["AI"], email="user@example.test", daily_send_enabled=True)
+    )
+    digest = _Digest()
+    scheduler = DailyDigestScheduler(
+        repository, lambda: digest, ExplodingEmail(), retry_delays=()
+    )
+
+    with caplog.at_level(logging.ERROR, logger="agentnews.services.scheduler"):
+        result = _run(
+            scheduler.run_due_once(now=datetime(2026, 10, 16, 0, 0, tzinfo=UTC))
+        )
+
+    assert result is not None and result.status == "failed"
+    assert result.error_code == "scheduler_error"
+    assert result.attempt_count == 3
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "agentnews.services.scheduler"
+    ]
+    assert len(records) == 3
+    assert all("未预期异常" in record.getMessage() for record in records)
+    assert any("2026-10-16" in record.getMessage() for record in records)
+    assert all(record.exc_info is not None for record in records)
+    assert "CHECK constraint failed" in caplog.text
 

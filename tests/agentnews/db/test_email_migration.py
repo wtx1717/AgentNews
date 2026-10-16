@@ -20,7 +20,7 @@ def test_email_tracking_migration_preserves_existing_delivery_rows(tmp_path):
             """
         )
 
-        assert run_migrations(connection, MIGRATIONS) == [4, 5]
+        assert run_migrations(connection, MIGRATIONS) == [4, 5, 6]
         assert run_migrations(connection, MIGRATIONS) == []
         delivery = connection.execute(
             "SELECT * FROM email_deliveries WHERE id = 4"
@@ -30,7 +30,7 @@ def test_email_tracking_migration_preserves_existing_delivery_rows(tmp_path):
         assert delivery["idempotency_key"] is None
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall()[-1]["version"] == 5
+        ).fetchall()[-1]["version"] == 6
         connection.execute("DELETE FROM reports WHERE id = 9")
         assert connection.execute(
             "SELECT COUNT(*) FROM email_deliveries WHERE id = 4"

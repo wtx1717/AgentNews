@@ -7,7 +7,7 @@ def test_scheduler_migration_adds_defaults_and_is_idempotent(tmp_path):
     database_path = tmp_path / "scheduler.sqlite3"
     connection = connect_database(database_path)
     try:
-        assert run_migrations(connection, MIGRATIONS) == [1, 2, 3, 4, 5]
+        assert run_migrations(connection, MIGRATIONS) == [1, 2, 3, 4, 5, 6]
         preferences = connection.execute(
             "SELECT daily_send_enabled, daily_send_time FROM user_preferences WHERE id = 1"
         ).fetchone()

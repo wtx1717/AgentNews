@@ -265,6 +265,86 @@ def _add_daily_digest_scheduler(connection: sqlite3.Connection) -> None:
     )
 
 
+def _fix_email_delivery_trigger_source(connection: sqlite3.Connection) -> None:
+    """Rebuild ``email_deliveries`` so ``scheduled_task`` passes its CHECK constraint.
+
+    Databases created before migration 4 included ``scheduled_task`` were left with
+    ``CHECK (trigger_source IN ('manual_api', 'natural_language'))``. Because
+    ``_add_email_delivery_tracking`` only adds a missing column, no later run of that
+    migration can widen the constraint. SQLite cannot alter a CHECK constraint, so the
+    table is rebuilt in place, preserving every existing row.
+    """
+
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(email_deliveries)").fetchall()
+    }
+    if not columns:
+        return
+
+    schema_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'email_deliveries'"
+    ).fetchone()
+    schema_sql = schema_row["sql"] if schema_row is not None else None
+    if schema_sql and "scheduled_task" in schema_sql:
+        return
+
+    # ``scheduled_digest_runs.email_delivery_id`` references this table, and SQLite
+    # rewrites such references on RENAME. Deferring enforcement keeps the swap valid
+    # for the rest of the transaction without disabling foreign keys (which is a no-op
+    # inside a transaction anyway).
+    connection.execute("PRAGMA defer_foreign_keys = ON")
+    connection.execute("DROP TABLE IF EXISTS email_deliveries_rebuilt")
+    connection.execute(
+        """
+        CREATE TABLE email_deliveries_rebuilt (
+            id INTEGER PRIMARY KEY,
+            report_id INTEGER NOT NULL,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'sent', 'failed')),
+            error_message TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+            requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            trigger_source TEXT NOT NULL DEFAULT 'manual_api'
+                CHECK (trigger_source IN ('manual_api', 'natural_language', 'scheduled_task')),
+            idempotency_key TEXT,
+            error_code TEXT,
+            FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO email_deliveries_rebuilt
+            (id, report_id, recipient, subject, status, error_message, retry_count,
+             requested_at, completed_at, trigger_source, idempotency_key, error_code)
+        SELECT id, report_id, recipient, subject, status, error_message, retry_count,
+               requested_at, completed_at, trigger_source, idempotency_key, error_code
+        FROM email_deliveries
+        """
+    )
+    connection.execute("DROP TABLE email_deliveries")
+    connection.execute(
+        "ALTER TABLE email_deliveries_rebuilt RENAME TO email_deliveries"
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_email_deliveries_idempotency_key
+            ON email_deliveries(idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_deliveries_report_requested
+            ON email_deliveries(report_id, requested_at DESC, id DESC)
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
     Migration(
@@ -286,6 +366,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=5,
         name="daily_digest_scheduler",
         apply=_add_daily_digest_scheduler,
+    ),
+    Migration(
+        version=6,
+        name="email_delivery_scheduled_task_source",
+        apply=_fix_email_delivery_trigger_source,
     ),
 )
 

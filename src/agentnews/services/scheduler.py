@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 import inspect
+import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,9 @@ from .digest import (
     DigestStorageError,
 )
 from .email import EmailService, EmailServiceError
+
+
+logger = logging.getLogger(__name__)
 
 
 class DailyDigestScheduler:
@@ -175,6 +179,13 @@ class DailyDigestScheduler:
                         return self.repository.get_scheduled_run(current.business_date) or current
                     current = claimed
                 except Exception:
+                    # Unexpected failures are deliberately mapped to one stable code, so the
+                    # traceback must be logged or the real cause is lost for good.
+                    logger.exception(
+                        "计划任务执行出现未预期异常（业务日期 %s，第 %s 次尝试）",
+                        current.business_date.isoformat(),
+                        current.attempt_count,
+                    )
                     if current.attempt_count >= 3:
                         return self.repository.update_scheduled_run(current.id, "failed", error_code="scheduler_error")
                     current = self.repository.update_scheduled_run(current.id, "pending", error_code="scheduler_error")
