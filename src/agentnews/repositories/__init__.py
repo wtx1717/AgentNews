@@ -5,6 +5,10 @@ from .sqlite import SQLiteRepository
 from .protocol import (
     ChatMessage,
     ChatSession,
+    EmailDeliveryAttempt,
+    EmailDeliveryRecord,
+    EmailDeliverySource,
+    EmailDeliveryStatus,
     MessageRole,
     ReportRecord,
     ReportReservation,
@@ -29,6 +33,10 @@ from .source_archive_storage import (
 __all__ = [
     "ChatMessage",
     "ChatSession",
+    "EmailDeliveryAttempt",
+    "EmailDeliveryRecord",
+    "EmailDeliverySource",
+    "EmailDeliveryStatus",
     "InMemoryRepository",
     "SQLiteRepository",
     "InvalidReportPathError",

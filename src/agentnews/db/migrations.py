@@ -151,6 +151,58 @@ def _add_chat_session_lifecycle(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_email_delivery_tracking(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(email_deliveries)").fetchall()
+    }
+    if "trigger_source" not in columns:
+        connection.execute(
+            "ALTER TABLE email_deliveries ADD COLUMN trigger_source TEXT NOT NULL "
+            "DEFAULT 'manual_api' CHECK (trigger_source IN "
+            "('manual_api', 'natural_language', 'scheduled_task'))"
+        )
+    if "idempotency_key" not in columns:
+        connection.execute(
+            "ALTER TABLE email_deliveries ADD COLUMN idempotency_key TEXT"
+        )
+    if "error_code" not in columns:
+        connection.execute("ALTER TABLE email_deliveries ADD COLUMN error_code TEXT")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_email_deliveries_idempotency_key
+            ON email_deliveries(idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_deliveries_report_requested
+            ON email_deliveries(report_id, requested_at DESC, id DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_delivery_attempts (
+            id INTEGER PRIMARY KEY,
+            delivery_id INTEGER NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+            status TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+            error_code TEXT,
+            error_message TEXT,
+            attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (delivery_id, attempt_number),
+            FOREIGN KEY (delivery_id) REFERENCES email_deliveries(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_delivery_attempts_delivery "
+        "ON email_delivery_attempts(delivery_id, attempt_number)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
     Migration(
@@ -162,6 +214,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         name="chat_session_lifecycle",
         apply=_add_chat_session_lifecycle,
+    ),
+    Migration(
+        version=4,
+        name="email_delivery_tracking",
+        apply=_add_email_delivery_tracking,
     ),
 )
 

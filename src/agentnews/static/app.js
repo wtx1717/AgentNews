@@ -56,6 +56,9 @@ const elements = {
   detailSourceCount: document.querySelector("#detail-source-count"),
   detailTitle: document.querySelector("#detail-title"),
   detailSummary: document.querySelector("#detail-summary"),
+  emailDeliveryStatus: document.querySelector("#email-delivery-status"),
+  sendReportEmail: document.querySelector("#send-report-email"),
+  resendReportEmail: document.querySelector("#resend-report-email"),
   detailMarkdown: document.querySelector("#detail-markdown"),
   detailSources: document.querySelector("#detail-sources"),
   sourceViewer: document.querySelector("#source-viewer"),
@@ -651,6 +654,7 @@ async function loadReport(reportId) {
     elements.detailSourceCount.textContent = `${(report.sources || []).length} 个来源`;
     elements.detailTitle.textContent = report.title || "未命名日报";
     elements.detailSummary.textContent = report.summary || "";
+    renderEmailDeliveryStatus(report.email_deliveries || []);
     elements.detailMarkdown.textContent = report.markdown || "";
     elements.detailSources.replaceChildren(...(report.sources || []).map(renderSource));
     elements.detailPlaceholder.hidden = true;
@@ -661,6 +665,41 @@ async function loadReport(reportId) {
     elements.sourceViewer.hidden = true;
   } catch (error) {
     elements.detailPlaceholder.textContent = `读取失败：${error.message}`;
+  }
+}
+
+function renderEmailDeliveryStatus(deliveries) {
+  const latest = deliveries[0] || null;
+  elements.sendReportEmail.disabled = Boolean(latest);
+  elements.sendReportEmail.textContent = latest?.status === "sent" ? "已发送" : "发送日报";
+  elements.resendReportEmail.hidden = !latest || latest.status === "pending";
+  elements.resendReportEmail.disabled = latest?.status === "pending";
+  elements.resendReportEmail.textContent = latest?.status === "failed" ? "重试发送" : "明确重发";
+  if (!latest) {
+    elements.emailDeliveryStatus.textContent = "尚未发送";
+    return;
+  }
+  const statusText = latest.status === "sent" ? "发送成功" : latest.status === "pending" ? "发送中" : "发送失败";
+  const recipient = latest.recipient ? `至 ${latest.recipient}` : "收件邮箱未设置";
+  const error = latest.error_message ? `；${latest.error_message}` : "";
+  elements.emailDeliveryStatus.textContent = `${statusText}${recipient ? `，${recipient}` : ""}${error}`;
+}
+
+async function sendReportEmail(resend) {
+  if (!state.selectedReportId) return;
+  elements.sendReportEmail.disabled = true;
+  elements.resendReportEmail.disabled = true;
+  elements.emailDeliveryStatus.textContent = "正在发送日报…";
+  try {
+    await request(`/api/reports/${encodeURIComponent(state.selectedReportId)}/email`, {
+      method: "POST",
+      body: JSON.stringify({ resend }),
+    });
+    await loadReport(state.selectedReportId);
+  } catch (error) {
+    elements.emailDeliveryStatus.textContent = `发送请求失败：${error.message}`;
+    elements.sendReportEmail.disabled = false;
+    elements.resendReportEmail.disabled = false;
   }
 }
 
@@ -759,6 +798,8 @@ elements.bashApprove.addEventListener("click", () => submitBashApproval("approve
 elements.bashReject.addEventListener("click", () => submitBashApproval("reject"));
 elements.bashDialog.addEventListener("cancel", (event) => event.preventDefault());
 elements.digestButton.addEventListener("click", runDigest);
+elements.sendReportEmail.addEventListener("click", () => sendReportEmail(false));
+elements.resendReportEmail.addEventListener("click", () => sendReportEmail(true));
 elements.refreshReports.addEventListener("click", () => loadReports({ reset: true }));
 elements.loadMore.addEventListener("click", () => loadReports());
 document.querySelector("#close-source").addEventListener("click", () => { elements.sourceViewer.hidden = true; });

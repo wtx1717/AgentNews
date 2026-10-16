@@ -362,12 +362,14 @@ class ChatRunManager:
         bash_service: BashService,
         *,
         digest_handler: Callable[[str, str], Any] | None = None,
+        email_handler: Callable[[int | None, bool], Any] | None = None,
         approval_timeout_seconds: float = APPROVAL_TIMEOUT_SECONDS,
     ) -> None:
         self.repository = repository
         self.chat_service = chat_service
         self.bash_service = bash_service
         self.digest_handler = digest_handler
+        self.email_handler = email_handler
         if approval_timeout_seconds <= 0:
             raise ValueError("approval_timeout_seconds must be positive")
         self.approval_timeout_seconds = float(approval_timeout_seconds)
@@ -407,6 +409,8 @@ class ChatRunManager:
             }
             if self.digest_handler is not None:
                 run_kwargs["digest_handler"] = self.digest_handler
+            if self.email_handler is not None:
+                run_kwargs["email_handler"] = self.email_handler
             record.result = await self.chat_service.run(
                 message,
                 record.session_id,

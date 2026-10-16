@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
 SessionStatus = Literal["active", "archived"]
+EmailDeliveryStatus = Literal["pending", "sent", "failed"]
+EmailDeliverySource = Literal["manual_api", "natural_language", "scheduled_task"]
 
 
 class SessionArchivedError(RuntimeError):
@@ -104,6 +106,34 @@ class ReportSource:
     archive_file_path: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class EmailDeliveryRecord:
+    id: int
+    report_id: int
+    recipient: str
+    subject: str
+    status: EmailDeliveryStatus
+    error_code: str | None
+    error_message: str | None
+    retry_count: int
+    trigger_source: EmailDeliverySource
+    idempotency_key: str | None
+    requested_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class EmailDeliveryAttempt:
+    id: int
+    delivery_id: int
+    attempt_number: int
+    status: Literal["sent", "failed"]
+    error_code: str | None
+    error_message: str | None
+    attempted_at: datetime
+    completed_at: datetime
+
+
 class RepositoryProtocol(Protocol):
     """Synchronous application repository contract, independent of storage backend."""
 
@@ -178,3 +208,39 @@ class RepositoryProtocol(Protocol):
     def get_report_sources(self, report_id: int) -> tuple[ReportSource, ...]: ...
 
     def get_source(self, source_id: int) -> ReportSource | None: ...
+
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]: ...
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None: ...
+
+    def list_email_deliveries(self, report_id: int) -> tuple[EmailDeliveryRecord, ...]: ...
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]: ...
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: Literal["sent", "failed"],
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt: ...
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord: ...

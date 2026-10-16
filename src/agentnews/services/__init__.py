@@ -20,6 +20,15 @@ from .chat import (
 )
 from .report import ReportDeletionError, ReportService
 from .bash import BashAudit, BashService, ChatRunBusyError, ChatRunManager
+from .email import (
+    EmailSendResult,
+    EmailService,
+    EmailServiceError,
+    ReportContentUnavailableError,
+    ReportNotFoundError,
+    build_report_email_body,
+    classify_smtp_error,
+)
 
 __all__ = [
     "DigestConfigurationError",
@@ -42,4 +51,11 @@ __all__ = [
     "BashService",
     "ChatRunBusyError",
     "ChatRunManager",
+    "EmailSendResult",
+    "EmailService",
+    "EmailServiceError",
+    "ReportContentUnavailableError",
+    "ReportNotFoundError",
+    "build_report_email_body",
+    "classify_smtp_error",
 ]

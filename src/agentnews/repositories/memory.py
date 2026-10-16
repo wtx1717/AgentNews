@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 import json
 import threading
@@ -12,6 +13,10 @@ from uuid import uuid4
 from .protocol import (
     ChatMessage,
     ChatSession,
+    EmailDeliveryAttempt,
+    EmailDeliveryRecord,
+    EmailDeliverySource,
+    EmailDeliveryStatus,
     MessageRole,
     ReportRecord,
     ReportReservation,
@@ -38,9 +43,13 @@ class InMemoryRepository:
         self._reservations: dict[int, ReportReservation] = {}
         self._reports: dict[int, ReportRecord] = {}
         self._report_sources: dict[int, list[ReportSource]] = {}
+        self._email_deliveries: dict[int, EmailDeliveryRecord] = {}
+        self._email_delivery_attempts: dict[int, list[EmailDeliveryAttempt]] = {}
         self._next_message_id = 1
         self._next_test_report_id: int | None = None
         self._next_source_id = 1
+        self._next_email_delivery_id = 1
+        self._next_email_attempt_id = 1
 
     def get_preferences(self) -> UserPreferences:
         with self._lock:
@@ -267,6 +276,14 @@ class InMemoryRepository:
             if self._reports.pop(report_id, None) is None:
                 return False
             self._report_sources.pop(report_id, None)
+            delivery_ids = [
+                delivery.id
+                for delivery in self._email_deliveries.values()
+                if delivery.report_id == report_id
+            ]
+            for delivery_id in delivery_ids:
+                self._email_deliveries.pop(delivery_id, None)
+                self._email_delivery_attempts.pop(delivery_id, None)
             return True
 
     def list_reports(
@@ -356,6 +373,129 @@ class InMemoryRepository:
                         return source
             return None
 
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]:
+        _require_positive_id(report_id, "report_id")
+        _validate_delivery_fields(recipient, subject, trigger_source, idempotency_key)
+        with self._lock:
+            if report_id not in self._reports:
+                raise KeyError(f"unknown report: {report_id}")
+            for delivery in self._email_deliveries.values():
+                if delivery.idempotency_key == idempotency_key:
+                    return delivery, False
+            now = _utc_now()
+            delivery = EmailDeliveryRecord(
+                id=self._next_email_delivery_id,
+                report_id=report_id,
+                recipient=recipient,
+                subject=subject,
+                status="pending",
+                error_code=None,
+                error_message=None,
+                retry_count=0,
+                trigger_source=trigger_source,
+                idempotency_key=idempotency_key,
+                requested_at=now,
+                completed_at=None,
+            )
+            self._next_email_delivery_id += 1
+            self._email_deliveries[delivery.id] = delivery
+            self._email_delivery_attempts[delivery.id] = []
+            return delivery, True
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            return self._email_deliveries.get(delivery_id)
+
+    def list_email_deliveries(
+        self, report_id: int
+    ) -> tuple[EmailDeliveryRecord, ...]:
+        _require_positive_id(report_id, "report_id")
+        with self._lock:
+            deliveries = [
+                delivery
+                for delivery in self._email_deliveries.values()
+                if delivery.report_id == report_id
+            ]
+            deliveries.sort(key=lambda item: (item.requested_at, item.id), reverse=True)
+            return tuple(deliveries)
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            return tuple(self._email_delivery_attempts.get(delivery_id, ()))
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt:
+        _require_positive_id(delivery_id, "delivery_id")
+        _validate_delivery_attempt(attempt_number, status, error_code, error_message)
+        with self._lock:
+            if delivery_id not in self._email_deliveries:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            attempts = self._email_delivery_attempts[delivery_id]
+            if any(attempt.attempt_number == attempt_number for attempt in attempts):
+                raise ValueError("duplicate email delivery attempt")
+            now = _utc_now()
+            attempt = EmailDeliveryAttempt(
+                id=self._next_email_attempt_id,
+                delivery_id=delivery_id,
+                attempt_number=attempt_number,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                attempted_at=now,
+                completed_at=now,
+            )
+            self._next_email_attempt_id += 1
+            attempts.append(attempt)
+            return attempt
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord:
+        _require_positive_id(delivery_id, "delivery_id")
+        if status not in {"pending", "sent", "failed"}:
+            raise ValueError("invalid delivery status")
+        if retry_count is not None and (
+            isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
+        ):
+            raise ValueError("retry_count must be a non-negative integer")
+        with self._lock:
+            delivery = self._email_deliveries.get(delivery_id)
+            if delivery is None:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            updated = replace(
+                delivery,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                retry_count=(delivery.retry_count if retry_count is None else retry_count),
+                completed_at=None if status == "pending" else _utc_now(),
+            )
+            self._email_deliveries[delivery_id] = updated
+            return updated
+
 
 def _normalize_preferences(value: UserPreferences) -> UserPreferences:
     if not isinstance(value, UserPreferences):
@@ -419,6 +559,36 @@ def _freeze_json(value: Any) -> Any:
 def _require_positive_id(value: int, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{field_name} must be a positive integer")
+
+
+def _validate_delivery_fields(
+    recipient: str,
+    subject: str,
+    trigger_source: str,
+    idempotency_key: str,
+) -> None:
+    if not isinstance(recipient, str) or not isinstance(subject, str):
+        raise TypeError("recipient and subject must be strings")
+    if trigger_source not in {"manual_api", "natural_language", "scheduled_task"}:
+        raise ValueError("invalid email delivery source")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("idempotency_key must not be empty")
+
+
+def _validate_delivery_attempt(
+    attempt_number: int,
+    status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
+        raise ValueError("attempt_number must be a positive integer")
+    if status not in {"sent", "failed"}:
+        raise ValueError("invalid email attempt status")
+    if error_code is not None and not isinstance(error_code, str):
+        raise TypeError("error_code must be a string or None")
+    if error_message is not None and not isinstance(error_message, str):
+        raise TypeError("error_message must be a string or None")
 
 
 def _require_date(value: date, field_name: str) -> None:

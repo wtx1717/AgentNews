@@ -60,6 +60,7 @@ class ChatService:
         *,
         bash_approval_handler: Callable[[str, str], Any] | None = None,
         digest_handler: Callable[[str, str], Any] | None = None,
+        email_handler: Callable[[int | None, bool], Any] | None = None,
         run_id: str | None = None,
     ) -> ChatResult:
         if not isinstance(message, str) or not message.strip():
@@ -97,6 +98,10 @@ class ChatService:
                 runner.ainvoke, "digest_handler"
             ):
                 invoke_kwargs["digest_handler"] = digest_handler
+            if email_handler is not None and _accepts_keyword(
+                runner.ainvoke, "email_handler"
+            ):
+                invoke_kwargs["email_handler"] = email_handler
             run = await runner.ainvoke(normalized_message, **invoke_kwargs)
             if not isinstance(run, AgentRunResult):
                 raise TypeError("invalid agent result")

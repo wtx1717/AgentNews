@@ -24,6 +24,7 @@ from ..tools import (
     OnlineSearchResult,
     create_bash_tool,
     create_digest_tool,
+    create_send_report_email_tool,
     create_local_file_tools,
 )
 from ..tools.path_security import ManagedPathResolver
@@ -94,6 +95,7 @@ class AgentRunner:
         task_context: str | None = None,
         bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
         digest_handler: Callable[[str, str], Awaitable[str]] | None = None,
+        email_handler: Callable[[int | None, bool], Awaitable[str]] | None = None,
     ) -> AgentRunResult:
         """Execute one prompt and its model-selected tools asynchronously.
 
@@ -121,6 +123,8 @@ class AgentRunner:
                 tools.append(create_bash_tool(resolved_bash_handler))
             if digest_handler is not None:
                 tools.append(create_digest_tool(digest_handler))
+            if email_handler is not None:
+                tools.append(create_send_report_email_tool(email_handler))
             mcp_configured = (
                 self.settings.mcp_search_server_url is not None
                 or self.settings.mcp_search_api_key is not None

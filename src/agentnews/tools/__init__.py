@@ -21,6 +21,7 @@ from .bash import (
     create_bash_tool,
 )
 from .digest import GenerateDigestInput, create_digest_tool
+from .email import SendReportEmailInput, create_send_report_email_tool
 from .registry import (
     ListDirInput,
     ReadFileInput,
@@ -91,6 +92,8 @@ __all__ = [
     "create_bash_tool",
     "GenerateDigestInput",
     "create_digest_tool",
+    "SendReportEmailInput",
+    "create_send_report_email_tool",
     "list_dir",
     "read_file",
     "search_content",

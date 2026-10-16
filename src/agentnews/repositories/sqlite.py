@@ -15,6 +15,10 @@ from ..db.migrations import MIGRATIONS, run_migrations
 from .protocol import (
     ChatMessage,
     ChatSession,
+    EmailDeliveryAttempt,
+    EmailDeliveryRecord,
+    EmailDeliverySource,
+    EmailDeliveryStatus,
     MessageRole,
     ReportRecord,
     ReportReservation,
@@ -564,6 +568,154 @@ class SQLiteRepository:
             ).fetchone()
             return _source_from_row(row) if row is not None else None
 
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]:
+        _require_positive_id(report_id, "report_id")
+        _validate_delivery_fields(recipient, subject, trigger_source, idempotency_key)
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            report = self._connection.execute(
+                "SELECT 1 FROM reports WHERE id = ? AND file_path NOT GLOB ?",
+                (report_id, _PLACEHOLDER_PREFIX + "*"),
+            ).fetchone()
+            if report is None:
+                raise KeyError(f"unknown report: {report_id}")
+            existing = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return _email_delivery_from_row(existing), False
+            now = _utc_now_text()
+            cursor = self._connection.execute(
+                """
+                INSERT INTO email_deliveries
+                    (report_id, recipient, subject, status, error_code, error_message,
+                     retry_count, trigger_source, idempotency_key, requested_at, completed_at)
+                VALUES (?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?, NULL)
+                """,
+                (report_id, recipient, subject, trigger_source, idempotency_key, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_from_row(row), True
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+            return _email_delivery_from_row(row) if row is not None else None
+
+    def list_email_deliveries(
+        self, report_id: int
+    ) -> tuple[EmailDeliveryRecord, ...]:
+        _require_positive_id(report_id, "report_id")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM email_deliveries
+                WHERE report_id = ?
+                ORDER BY requested_at DESC, id DESC
+                """,
+                (report_id,),
+            ).fetchall()
+            return tuple(_email_delivery_from_row(row) for row in rows)
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM email_delivery_attempts
+                WHERE delivery_id = ?
+                ORDER BY attempt_number ASC
+                """,
+                (delivery_id,),
+            ).fetchall()
+            return tuple(_email_delivery_attempt_from_row(row) for row in rows)
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt:
+        _require_positive_id(delivery_id, "delivery_id")
+        _validate_delivery_attempt(attempt_number, status, error_code, error_message)
+        attempted_at = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                INSERT INTO email_delivery_attempts
+                    (delivery_id, attempt_number, status, error_code, error_message,
+                     attempted_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delivery_id,
+                    attempt_number,
+                    status,
+                    error_code,
+                    error_message,
+                    attempted_at,
+                    attempted_at,
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM email_delivery_attempts WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_attempt_from_row(row)
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord:
+        _require_positive_id(delivery_id, "delivery_id")
+        if status not in {"pending", "sent", "failed"}:
+            raise ValueError("invalid delivery status")
+        if retry_count is not None and (
+            isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
+        ):
+            raise ValueError("retry_count must be a non-negative integer")
+        completed_at = None if status == "pending" else _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE email_deliveries
+                SET status = ?, error_code = ?, error_message = ?,
+                    retry_count = COALESCE(?, retry_count), completed_at = ?
+                WHERE id = ?
+                """,
+                (status, error_code, error_message, retry_count, completed_at, delivery_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            row = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_from_row(row)
+
     def _connection_or_raise(self) -> sqlite3.Connection:
         if self._closed:
             raise RuntimeError("repository is closed")
@@ -644,6 +796,70 @@ def _source_from_row(row: sqlite3.Row) -> ReportSource:
         snippet=row["snippet"],
         archive_file_path=row["archive_file_path"],
     )
+
+
+def _email_delivery_from_row(row: sqlite3.Row) -> EmailDeliveryRecord:
+    return EmailDeliveryRecord(
+        id=int(row["id"]),
+        report_id=int(row["report_id"]),
+        recipient=row["recipient"],
+        subject=row["subject"],
+        status=row["status"],
+        error_code=row["error_code"],
+        error_message=row["error_message"],
+        retry_count=int(row["retry_count"]),
+        trigger_source=row["trigger_source"],
+        idempotency_key=row["idempotency_key"],
+        requested_at=_parse_datetime(row["requested_at"]),
+        completed_at=(
+            _parse_datetime(row["completed_at"])
+            if row["completed_at"] is not None
+            else None
+        ),
+    )
+
+
+def _email_delivery_attempt_from_row(row: sqlite3.Row) -> EmailDeliveryAttempt:
+    return EmailDeliveryAttempt(
+        id=int(row["id"]),
+        delivery_id=int(row["delivery_id"]),
+        attempt_number=int(row["attempt_number"]),
+        status=row["status"],
+        error_code=row["error_code"],
+        error_message=row["error_message"],
+        attempted_at=_parse_datetime(row["attempted_at"]),
+        completed_at=_parse_datetime(row["completed_at"]),
+    )
+
+
+def _validate_delivery_fields(
+    recipient: str,
+    subject: str,
+    trigger_source: str,
+    idempotency_key: str,
+) -> None:
+    if not isinstance(recipient, str) or not isinstance(subject, str):
+        raise TypeError("recipient and subject must be strings")
+    if trigger_source not in {"manual_api", "natural_language", "scheduled_task"}:
+        raise ValueError("invalid email delivery source")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("idempotency_key must not be empty")
+
+
+def _validate_delivery_attempt(
+    attempt_number: int,
+    status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
+        raise ValueError("attempt_number must be a positive integer")
+    if status not in {"sent", "failed"}:
+        raise ValueError("invalid email attempt status")
+    if error_code is not None and not isinstance(error_code, str):
+        raise TypeError("error_code must be a string or None")
+    if error_message is not None and not isinstance(error_message, str):
+        raise TypeError("error_message must be a string or None")
 
 
 def _encode_metadata(value: Mapping[str, object] | None) -> str | None:

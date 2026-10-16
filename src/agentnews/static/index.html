@@ -164,6 +164,16 @@
             </div>
             <h3 id="detail-title" class="detail-title"></h3>
             <p id="detail-summary" class="detail-summary"></p>
+            <div class="email-delivery">
+              <div>
+                <h4>邮件发送</h4>
+                <p id="email-delivery-status" role="status" aria-live="polite">尚未发送</p>
+              </div>
+              <div class="email-delivery-actions">
+                <button id="send-report-email" class="button button-secondary" type="button">发送日报</button>
+                <button id="resend-report-email" class="button button-quiet" type="button" hidden>明确重发</button>
+              </div>
+            </div>
             <div class="markdown-block">
               <h4>Markdown 正文</h4>
               <pre id="detail-markdown" class="markdown-content"></pre>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 import json
 import logging
@@ -42,6 +43,11 @@ from .services.digest import (
 )
 from .services.report import ReportDeletionError, ReportService
 from .services.bash import ChatRunBusyError, ChatRunManager, BashService
+from .services.email import (
+    EmailService,
+    ReportContentUnavailableError,
+    ReportNotFoundError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -98,11 +104,16 @@ class BashApprovalPayload(_StrictModel):
     decision: Literal["approve", "reject"]
 
 
+class EmailSendPayload(_StrictModel):
+    resend: bool = Field(default=False, strict=True)
+
+
 def create_app(
     repository: RepositoryProtocol | None = None,
     *,
     agent_runner: AgentRunner | Any | None = None,
     digest_service: DigestService | None = None,
+    email_service: EmailService | None = None,
     settings: Settings | None = None,
 ) -> FastAPI:
     """Create an API application with replaceable service dependencies."""
@@ -117,6 +128,9 @@ def create_app(
     source_archive_storage = SourceArchiveStorage(app_settings.source_archive_root)
     report_service = ReportService(
         app_repository, report_storage, source_archive_storage
+    )
+    email_service = email_service or EmailService(
+        app_repository, report_storage, settings=app_settings
     )
     chat_service = ChatService(app_repository, agent_runner=agent_runner)
     bash_service = BashService(
@@ -198,11 +212,40 @@ def create_app(
             }
         )
 
+    async def send_report_email_for_agent(
+        report_id: int | None,
+        resend: bool,
+    ) -> str:
+        try:
+            result = await asyncio.to_thread(
+                email_service.send_report,
+                report_id,
+                resend=resend,
+                trigger_source="natural_language",
+            )
+        except ReportNotFoundError:
+            return _json_tool_error("report_not_found", "没有找到可发送的已完成日报。")
+        except ReportContentUnavailableError:
+            return _json_tool_error("report_content_unavailable", "日报正文不可用，未发送邮件。")
+        return _json_result(
+            {
+                "ok": result.delivery.status == "sent",
+                "result": {
+                    "delivery": _email_delivery_to_dict(
+                        result.delivery,
+                        app_repository.list_email_delivery_attempts(result.delivery.id),
+                    ),
+                    "duplicate": result.duplicate,
+                },
+            }
+        )
+
     chat_run_manager = ChatRunManager(
         app_repository,
         chat_service,
         bash_service,
         digest_handler=generate_digest_for_agent,
+        email_handler=send_report_email_for_agent,
     )
     app = FastAPI(title="AgentNews API", version="0.1.0")
     static_root = Path(__file__).resolve().parent / "static"
@@ -210,6 +253,7 @@ def create_app(
     app.state.repository = app_repository
     app.state.chat_service = chat_service
     app.state.bash_service = bash_service
+    app.state.email_service = email_service
     app.state.chat_run_manager = chat_run_manager
     app.state.settings = app_settings
 
@@ -502,6 +546,40 @@ def create_app(
             "path": report.file_path,
             "markdown": markdown,
             "sources": [_source_to_dict(source) for source in app_repository.get_report_sources(report.id)],
+            "email_deliveries": _email_deliveries_to_dict(app_repository, report_id),
+        }
+
+    @app.get("/api/reports/{report_id}/email-deliveries")
+    async def list_report_email_deliveries(report_id: int) -> dict[str, Any]:
+        _find_report(app_repository, report_id)
+        return {"items": _email_deliveries_to_dict(app_repository, report_id)}
+
+    @app.post("/api/reports/{report_id}/email")
+    async def send_report_email(
+        report_id: int,
+        payload: EmailSendPayload,
+    ) -> dict[str, Any]:
+        _find_report(app_repository, report_id)
+        try:
+            result = await asyncio.to_thread(
+                email_service.send_report,
+                report_id,
+                resend=payload.resend,
+                trigger_source="manual_api",
+            )
+        except ReportContentUnavailableError:
+            raise ApiError(
+                404, "report_content_not_found", "日报正文不可用，未发送邮件。"
+            ) from None
+        except ReportNotFoundError:
+            raise ApiError(404, "report_not_found", "日报不存在") from None
+        return {
+            "ok": result.delivery.status == "sent",
+            "duplicate": result.duplicate,
+            "delivery": _email_delivery_to_dict(
+                result.delivery,
+                app_repository.list_email_delivery_attempts(result.delivery.id),
+            ),
         }
 
     @app.delete("/api/reports/{report_id}", status_code=204)
@@ -609,6 +687,48 @@ def _source_to_dict(source: Any) -> dict[str, Any]:
         "published_at": source.published_at,
         "snippet": source.snippet,
         "archive_path": source.archive_file_path,
+    }
+
+
+def _email_deliveries_to_dict(
+    repository: RepositoryProtocol,
+    report_id: int,
+) -> list[dict[str, Any]]:
+    return [
+        _email_delivery_to_dict(
+            delivery,
+            repository.list_email_delivery_attempts(delivery.id),
+        )
+        for delivery in repository.list_email_deliveries(report_id)
+    ]
+
+
+def _email_delivery_to_dict(delivery: Any, attempts: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": delivery.id,
+        "report_id": delivery.report_id,
+        "recipient": delivery.recipient,
+        "subject": delivery.subject,
+        "status": delivery.status,
+        "error_code": delivery.error_code,
+        "error_message": delivery.error_message,
+        "retry_count": delivery.retry_count,
+        "trigger_source": delivery.trigger_source,
+        "requested_at": delivery.requested_at.isoformat(),
+        "completed_at": (
+            delivery.completed_at.isoformat() if delivery.completed_at is not None else None
+        ),
+        "attempts": [
+            {
+                "attempt_number": attempt.attempt_number,
+                "status": attempt.status,
+                "error_code": attempt.error_code,
+                "error_message": attempt.error_message,
+                "attempted_at": attempt.attempted_at.isoformat(),
+                "completed_at": attempt.completed_at.isoformat(),
+            }
+            for attempt in attempts
+        ],
     }
 
 
