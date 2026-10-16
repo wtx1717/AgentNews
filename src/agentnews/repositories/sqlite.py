@@ -23,9 +23,12 @@ from .protocol import (
     ReportRecord,
     ReportReservation,
     ReportSource,
+    ScheduledDigestRun,
+    ScheduledDigestRunStatus,
     SessionArchivedError,
     SessionStatus,
     UserPreferences,
+    normalize_daily_send_time,
 )
 
 
@@ -81,7 +84,8 @@ class SQLiteRepository:
         with self._lock:
             row = self._connection_or_raise().execute(
                 """
-                SELECT display_name, email, timezone, topics_json, keywords_json
+                SELECT display_name, email, timezone, topics_json, keywords_json,
+                       daily_send_enabled, daily_send_time
                 FROM user_preferences
                 WHERE id = 1
                 """
@@ -100,7 +104,8 @@ class SQLiteRepository:
                 """
                 UPDATE user_preferences
                 SET display_name = ?, email = ?, timezone = ?,
-                    topics_json = ?, keywords_json = ?, updated_at = ?
+                    topics_json = ?, keywords_json = ?, daily_send_enabled = ?,
+                    daily_send_time = ?, updated_at = ?
                 WHERE id = 1
                 """,
                 (
@@ -109,12 +114,143 @@ class SQLiteRepository:
                     normalized.timezone,
                     topics_json,
                     keywords_json,
+                    int(normalized.daily_send_enabled),
+                    normalized.daily_send_time,
                     now,
                 ),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("user preferences row is missing")
         return normalized
+
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]:
+        _require_date(business_date, "business_date")
+        _validate_scheduled_status(status)
+        now = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            existing = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE business_date = ?",
+                (business_date.isoformat(),),
+            ).fetchone()
+            if existing is not None:
+                return _scheduled_run_from_row(existing), False
+            cursor = self._connection.execute(
+                """
+                INSERT INTO scheduled_digest_runs
+                    (business_date, status, attempt_count, completed_at, error_code,
+                     created_at, updated_at)
+                VALUES (?, ?, 0, ?, ?, ?, ?)
+                """,
+                (
+                    business_date.isoformat(),
+                    status,
+                    now if status in {"failed", "skipped"} else None,
+                    error_code,
+                    now,
+                    now,
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row), True
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None:
+        _require_positive_id(run_id, "run_id")
+        now = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE scheduled_digest_runs
+                SET status = 'running', attempt_count = attempt_count + 1,
+                    started_at = ?, completed_at = NULL, updated_at = ?
+                WHERE id = ? AND status = 'pending' AND attempt_count < 3
+                """,
+                (now, now, run_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row)
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None:
+        _require_date(business_date, "business_date")
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM scheduled_digest_runs WHERE business_date = ?",
+                (business_date.isoformat(),),
+            ).fetchone()
+            return _scheduled_run_from_row(row) if row is not None else None
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                "SELECT * FROM scheduled_digest_runs ORDER BY business_date DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return tuple(_scheduled_run_from_row(row) for row in rows)
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun:
+        _require_positive_id(run_id, "run_id")
+        _validate_scheduled_status(status)
+        if attempt_count is not None and (isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or not 0 <= attempt_count <= 3):
+            raise ValueError("attempt_count must be between 0 and 3")
+        final_time = completed_at
+        if final_time is None and status in {"succeeded", "failed", "skipped"}:
+            final_time = _utc_now()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE scheduled_digest_runs
+                SET status = ?, attempt_count = COALESCE(?, attempt_count),
+                    report_id = COALESCE(?, report_id),
+                    email_delivery_id = COALESCE(?, email_delivery_id),
+                    started_at = COALESCE(?, started_at),
+                    completed_at = ?, error_code = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    attempt_count,
+                    report_id,
+                    email_delivery_id,
+                    _datetime_text(started_at) if started_at is not None else None,
+                    _datetime_text(final_time) if final_time is not None else None,
+                    error_code,
+                    _utc_now_text(),
+                    run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown scheduled run: {run_id}")
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row)
 
     def create_session(self, title: str | None = None) -> ChatSession:
         if title is not None and not isinstance(title, str):
@@ -731,7 +867,14 @@ def _normalize_preferences(value: UserPreferences) -> UserPreferences:
         timezone=value.timezone,
         topics=value.topics,
         keywords=value.keywords,
+        daily_send_enabled=value.daily_send_enabled,
+        daily_send_time=normalize_daily_send_time(value.daily_send_time),
     )
+
+
+def _validate_scheduled_status(status: str) -> None:
+    if status not in {"pending", "running", "succeeded", "failed", "skipped"}:
+        raise ValueError("invalid scheduled run status")
 
 
 def _preferences_from_row(row: sqlite3.Row) -> UserPreferences:
@@ -743,6 +886,24 @@ def _preferences_from_row(row: sqlite3.Row) -> UserPreferences:
         timezone=row["timezone"],
         topics=topics,
         keywords=keywords,
+        daily_send_enabled=bool(row["daily_send_enabled"]),
+        daily_send_time=row["daily_send_time"],
+    )
+
+
+def _scheduled_run_from_row(row: sqlite3.Row) -> ScheduledDigestRun:
+    return ScheduledDigestRun(
+        id=int(row["id"]),
+        business_date=date.fromisoformat(row["business_date"]),
+        status=row["status"],
+        attempt_count=int(row["attempt_count"]),
+        report_id=int(row["report_id"]) if row["report_id"] is not None else None,
+        email_delivery_id=(
+            int(row["email_delivery_id"]) if row["email_delivery_id"] is not None else None
+        ),
+        started_at=_parse_datetime(row["started_at"]) if row["started_at"] else None,
+        completed_at=_parse_datetime(row["completed_at"]) if row["completed_at"] else None,
+        error_code=row["error_code"],
     )
 
 

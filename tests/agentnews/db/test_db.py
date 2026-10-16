@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "chat_sessions",
     "chat_messages",
     "email_deliveries",
+    "scheduled_digest_runs",
 }
 
 
@@ -27,19 +28,22 @@ def table_names(connection):
 def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
     database_path = tmp_path / "nested" / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1, 2, 3]
+    assert initialize_database(database_path) == [1, 2, 3, 4, 5]
 
     connection = connect_database(database_path)
     try:
         assert EXPECTED_TABLES <= table_names(connection)
         preference = connection.execute(
-            "SELECT id, timezone, topics_json, keywords_json FROM user_preferences"
+            "SELECT id, timezone, topics_json, keywords_json, daily_send_enabled, daily_send_time "
+            "FROM user_preferences"
         ).fetchone()
         assert dict(preference) == {
             "id": 1,
             "timezone": "Asia/Shanghai",
             "topics_json": "[]",
             "keywords_json": "[]",
+            "daily_send_enabled": 0,
+            "daily_send_time": "08:00",
         }
         migration = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -47,7 +51,7 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
         assert (migration["version"], migration["name"]) == (1, "initial_schema")
         assert connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()["version"] == 3
+        ).fetchone()["version"] == 5
         assert {row["name"] for row in connection.execute(
             "PRAGMA table_info(chat_sessions)"
         )} >= {"status", "archived_at"}
@@ -61,14 +65,14 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
 def test_repeated_initialization_is_idempotent(tmp_path):
     database_path = tmp_path / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1, 2, 3]
+    assert initialize_database(database_path) == [1, 2, 3, 4, 5]
     assert initialize_database(database_path) == []
 
     connection = connect_database(database_path)
     try:
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM schema_migrations"
-        ).fetchone()["count"] == 3
+        ).fetchone()["count"] == 5
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM user_preferences"
         ).fetchone()["count"] == 1
@@ -77,7 +81,7 @@ def test_repeated_initialization_is_idempotent(tmp_path):
 
 
 def test_migrations_have_contiguous_versions():
-    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
 
 
 def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_path):
@@ -106,7 +110,7 @@ def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_pat
     finally:
         connection.close()
 
-    assert initialize_database(database_path) == [2, 3]
+    assert initialize_database(database_path) == [2, 3, 4, 5]
 
     upgraded = connect_database(database_path)
     try:
@@ -120,7 +124,7 @@ def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_pat
             for row in upgraded.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-            ] == [1, 2, 3]
+            ] == [1, 2, 3, 4, 5]
         source = upgraded.execute(
             "SELECT report_id, archive_file_path FROM report_sources"
         ).fetchone()
@@ -237,7 +241,7 @@ def test_v1_database_upgrades_without_losing_rows(tmp_path):
     finally:
         connection.close()
 
-    assert initialize_database(database_path) == [2, 3]
+    assert initialize_database(database_path) == [2, 3, 4, 5]
     upgraded = connect_database(database_path)
     try:
         assert upgraded.execute(
@@ -273,7 +277,7 @@ def test_v2_database_upgrades_sessions_and_messages_without_loss(tmp_path):
     finally:
         connection.close()
 
-    assert initialize_database(database_path) == [3]
+    assert initialize_database(database_path) == [3, 4, 5]
     upgraded = connect_database(database_path)
     try:
         session = upgraded.execute(

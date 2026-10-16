@@ -102,6 +102,21 @@
               <span>时区</span>
               <input name="timezone" type="text" value="Asia/Shanghai" spellcheck="false">
             </label>
+            <div class="schedule-fields">
+              <label class="toggle-field">
+                <input name="daily_send_enabled" type="checkbox">
+                <span>
+                  <strong>每日自动发送</strong>
+                  <small>默认关闭，按当前时区发送已生成的日报</small>
+                </span>
+              </label>
+              <label class="field">
+                <span>每日发送时间</span>
+                <input name="daily_send_time" type="time" value="08:00" step="60">
+              </label>
+              <p id="schedule-timezone" class="field-hint"></p>
+              <div id="recent-scheduled-run" class="scheduled-run-summary" aria-live="polite"></div>
+            </div>
             <label class="field">
               <span>主题</span>
               <textarea name="topics" rows="2" placeholder="人工智能, 半导体" maxlength="2000"></textarea>

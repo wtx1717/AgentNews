@@ -16,7 +16,10 @@ from .protocol import (
     RepositoryProtocol,
     SessionArchivedError,
     SessionStatus,
+    ScheduledDigestRun,
+    ScheduledDigestRunStatus,
     UserPreferences,
+    normalize_daily_send_time,
 )
 from .report_storage import (
     InvalidReportPathError,
@@ -48,10 +51,13 @@ __all__ = [
     "RepositoryProtocol",
     "SessionArchivedError",
     "SessionStatus",
+    "ScheduledDigestRun",
+    "ScheduledDigestRunStatus",
     "StoredReport",
     "InvalidSourceArchivePathError",
     "SourceArchiveStorage",
     "StoredSourceArchive",
     "UserPreferences",
+    "normalize_daily_send_time",
     "MessageRole",
 ]

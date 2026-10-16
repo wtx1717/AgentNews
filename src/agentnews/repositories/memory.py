@@ -21,9 +21,12 @@ from .protocol import (
     ReportRecord,
     ReportReservation,
     ReportSource,
+    ScheduledDigestRun,
+    ScheduledDigestRunStatus,
     SessionArchivedError,
     SessionStatus,
     UserPreferences,
+    normalize_daily_send_time,
 )
 
 
@@ -45,6 +48,8 @@ class InMemoryRepository:
         self._report_sources: dict[int, list[ReportSource]] = {}
         self._email_deliveries: dict[int, EmailDeliveryRecord] = {}
         self._email_delivery_attempts: dict[int, list[EmailDeliveryAttempt]] = {}
+        self._scheduled_runs: dict[date, ScheduledDigestRun] = {}
+        self._next_scheduled_run_id = 1
         self._next_message_id = 1
         self._next_test_report_id: int | None = None
         self._next_source_id = 1
@@ -60,6 +65,106 @@ class InMemoryRepository:
         with self._lock:
             self._preferences = normalized
             return normalized
+
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]:
+        _require_date(business_date, "business_date")
+        _validate_scheduled_status(status)
+        with self._lock:
+            existing = self._scheduled_runs.get(business_date)
+            if existing is not None:
+                return existing, False
+            now = _utc_now()
+            run = ScheduledDigestRun(
+                id=self._next_scheduled_run_id,
+                business_date=business_date,
+                status=status,
+                attempt_count=0,
+                report_id=None,
+                email_delivery_id=None,
+                started_at=None,
+                completed_at=now if status in {"failed", "skipped"} else None,
+                error_code=error_code,
+            )
+            self._next_scheduled_run_id += 1
+            self._scheduled_runs[business_date] = run
+            return run, True
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None:
+        _require_positive_id(run_id, "run_id")
+        with self._lock:
+            for business_date, run in self._scheduled_runs.items():
+                if run.id == run_id:
+                    if run.status != "pending" or run.attempt_count >= 3:
+                        return None
+                    claimed = replace(
+                        run,
+                        status="running",
+                        attempt_count=run.attempt_count + 1,
+                        started_at=_utc_now(),
+                        completed_at=None,
+                    )
+                    self._scheduled_runs[business_date] = claimed
+                    return claimed
+            return None
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None:
+        _require_date(business_date, "business_date")
+        with self._lock:
+            return self._scheduled_runs.get(business_date)
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._scheduled_runs.values(),
+                    key=lambda item: (item.business_date, item.id),
+                    reverse=True,
+                )[:limit]
+            )
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun:
+        _require_positive_id(run_id, "run_id")
+        _validate_scheduled_status(status)
+        if attempt_count is not None and (isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or not 0 <= attempt_count <= 3):
+            raise ValueError("attempt_count must be between 0 and 3")
+        with self._lock:
+            for business_date, run in self._scheduled_runs.items():
+                if run.id == run_id:
+                    updated = replace(
+                        run,
+                        status=status,
+                        attempt_count=run.attempt_count if attempt_count is None else attempt_count,
+                        report_id=run.report_id if report_id is None else report_id,
+                        email_delivery_id=run.email_delivery_id if email_delivery_id is None else email_delivery_id,
+                        started_at=run.started_at if started_at is None else started_at,
+                        completed_at=(
+                            _utc_now() if completed_at is None and status in {"succeeded", "failed", "skipped"}
+                            else completed_at
+                        ),
+                        error_code=error_code,
+                    )
+                    self._scheduled_runs[business_date] = updated
+                    return updated
+            raise KeyError(f"unknown scheduled run: {run_id}")
 
     def create_session(self, title: str | None = None) -> ChatSession:
         if title is not None and not isinstance(title, str):
@@ -506,7 +611,14 @@ def _normalize_preferences(value: UserPreferences) -> UserPreferences:
         timezone=value.timezone,
         topics=value.topics,
         keywords=value.keywords,
+        daily_send_enabled=value.daily_send_enabled,
+        daily_send_time=normalize_daily_send_time(value.daily_send_time),
     )
+
+
+def _validate_scheduled_status(status: str) -> None:
+    if status not in {"pending", "running", "succeeded", "failed", "skipped"}:
+        raise ValueError("invalid scheduled run status")
 
 
 def _validate_session_listing(

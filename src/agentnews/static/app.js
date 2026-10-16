@@ -43,6 +43,8 @@ const elements = {
   preferencesForm: document.querySelector("#preferences-form"),
   preferencesStatus: document.querySelector("#preferences-status"),
   preferencesError: document.querySelector("#preferences-error"),
+  scheduleTimezone: document.querySelector("#schedule-timezone"),
+  recentScheduledRun: document.querySelector("#recent-scheduled-run"),
   digestButton: document.querySelector("#run-digest"),
   digestStatus: document.querySelector("#digest-status"),
   digestMessage: document.querySelector("#digest-message"),
@@ -218,6 +220,27 @@ function setFormValues(form, preferences) {
   form.elements.timezone.value = preferences.timezone || "Asia/Shanghai";
   form.elements.topics.value = (preferences.topics || []).join("\n");
   form.elements.keywords.value = (preferences.keywords || []).join("\n");
+  form.elements.daily_send_enabled.checked = Boolean(preferences.daily_send_enabled);
+  form.elements.daily_send_time.value = preferences.daily_send_time || "08:00";
+  elements.scheduleTimezone.textContent = `发送时间按 ${preferences.timezone || "当前时区"} 计算`;
+  renderRecentScheduledRun(preferences.recent_scheduled_run);
+}
+
+function renderRecentScheduledRun(run) {
+  if (!run) {
+    elements.recentScheduledRun.textContent = "最近任务：暂无记录";
+    return;
+  }
+  const labels = { pending: "等待执行", running: "执行中", succeeded: "已成功", failed: "失败", skipped: "已跳过" };
+  const details = [
+    `最近任务：${labels[run.status] || run.status}`,
+    `业务日期 ${run.business_date}`,
+    `尝试 ${run.attempt_count}/3`,
+  ];
+  if (run.report_id != null) details.push(`报告 #${run.report_id}`);
+  if (run.email_delivery_id != null) details.push(`邮件记录 #${run.email_delivery_id}`);
+  if (run.error_code) details.push(`错误 ${run.error_code}`);
+  elements.recentScheduledRun.textContent = details.join(" · ");
 }
 
 function readStoredSession() {
@@ -747,6 +770,8 @@ async function savePreferences(event) {
     timezone: form.elements.timezone.value.trim() || "Asia/Shanghai",
     topics: parseList(form.elements.topics.value),
     keywords: parseList(form.elements.keywords.value),
+    daily_send_enabled: form.elements.daily_send_enabled.checked,
+    daily_send_time: form.elements.daily_send_time.value,
   };
   try {
     const saved = await request("/api/settings", { method: "PUT", body: JSON.stringify(payload) });

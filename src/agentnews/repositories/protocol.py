@@ -11,6 +11,7 @@ MessageRole = Literal["system", "user", "assistant", "tool"]
 SessionStatus = Literal["active", "archived"]
 EmailDeliveryStatus = Literal["pending", "sent", "failed"]
 EmailDeliverySource = Literal["manual_api", "natural_language", "scheduled_task"]
+ScheduledDigestRunStatus = Literal["pending", "running", "succeeded", "failed", "skipped"]
 
 
 class SessionArchivedError(RuntimeError):
@@ -24,6 +25,8 @@ class UserPreferences:
     timezone: str = "Asia/Shanghai"
     topics: tuple[str, ...] | Sequence[str] = ()
     keywords: tuple[str, ...] | Sequence[str] = ()
+    daily_send_enabled: bool = False
+    daily_send_time: str = "08:00"
 
     def __post_init__(self) -> None:
         for name in ("display_name", "email", "timezone"):
@@ -39,6 +42,9 @@ class UserPreferences:
         object.__setattr__(self, "timezone", timezone)
         object.__setattr__(self, "topics", _normalized_values(self.topics, "topics"))
         object.__setattr__(self, "keywords", _normalized_values(self.keywords, "keywords"))
+        if not isinstance(self.daily_send_enabled, bool):
+            raise TypeError("daily_send_enabled must be a boolean")
+        object.__setattr__(self, "daily_send_time", normalize_daily_send_time(self.daily_send_time))
 
 
 def _normalized_values(values: Sequence[str], field_name: str) -> tuple[str, ...]:
@@ -52,6 +58,18 @@ def _normalized_values(values: Sequence[str], field_name: str) -> tuple[str, ...
         if normalized and normalized not in result:
             result.append(normalized)
     return tuple(result)
+
+
+def normalize_daily_send_time(value: str) -> str:
+    """Validate and normalize a daily schedule time to strict ``HH:MM``."""
+    if not isinstance(value, str):
+        raise TypeError("daily_send_time must be a string")
+    if len(value) != 5 or value[2] != ":" or not value[:2].isdigit() or not value[3:].isdigit():
+        raise ValueError("daily_send_time must use HH:MM format")
+    hour, minute = int(value[:2]), int(value[3:])
+    if hour > 23 or minute > 59:
+        raise ValueError("daily_send_time must use HH:MM format")
+    return f"{hour:02d}:{minute:02d}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,12 +152,52 @@ class EmailDeliveryAttempt:
     completed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledDigestRun:
+    id: int
+    business_date: date
+    status: ScheduledDigestRunStatus
+    attempt_count: int
+    report_id: int | None
+    email_delivery_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_code: str | None
+
+
 class RepositoryProtocol(Protocol):
     """Synchronous application repository contract, independent of storage backend."""
 
     def get_preferences(self) -> UserPreferences: ...
 
     def save_preferences(self, preferences: UserPreferences) -> UserPreferences: ...
+
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]: ...
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None: ...
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None: ...
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]: ...
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun: ...
 
     def create_session(self, title: str | None = None) -> ChatSession: ...
 

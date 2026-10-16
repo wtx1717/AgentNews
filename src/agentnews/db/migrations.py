@@ -152,6 +152,23 @@ def _add_chat_session_lifecycle(connection: sqlite3.Connection) -> None:
 
 
 def _add_email_delivery_tracking(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_deliveries (
+            id INTEGER PRIMARY KEY,
+            report_id INTEGER NOT NULL,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'sent', 'failed')),
+            error_message TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+            requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE
+        )
+        """
+    )
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(email_deliveries)").fetchall()
@@ -203,6 +220,51 @@ def _add_email_delivery_tracking(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_daily_digest_scheduler(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(user_preferences)").fetchall()
+    }
+    if "daily_send_enabled" not in columns:
+        connection.execute(
+            "ALTER TABLE user_preferences ADD COLUMN daily_send_enabled INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (daily_send_enabled IN (0, 1))"
+        )
+    if "daily_send_time" not in columns:
+        connection.execute(
+            "ALTER TABLE user_preferences ADD COLUMN daily_send_time TEXT NOT NULL DEFAULT '08:00' "
+            "CHECK (daily_send_time GLOB '[0-2][0-9]:[0-5][0-9]' AND substr(daily_send_time, 1, 2) < '24')"
+        )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_digest_runs (
+            id INTEGER PRIMARY KEY,
+            business_date TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'skipped')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 3),
+            report_id INTEGER,
+            email_delivery_id INTEGER,
+            started_at TEXT,
+            completed_at TEXT,
+            error_code TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE SET NULL,
+            FOREIGN KEY (email_delivery_id) REFERENCES email_deliveries(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_digest_runs_date "
+        "ON scheduled_digest_runs(business_date DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_digest_runs_status "
+        "ON scheduled_digest_runs(status, business_date DESC)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
     Migration(
@@ -219,6 +281,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=4,
         name="email_delivery_tracking",
         apply=_add_email_delivery_tracking,
+    ),
+    Migration(
+        version=5,
+        name="daily_digest_scheduler",
+        apply=_add_daily_digest_scheduler,
     ),
 )
 

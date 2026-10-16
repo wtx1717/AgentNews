@@ -86,6 +86,8 @@ class EmailService:
         resend: bool = False,
         trigger_source: EmailDeliverySource = "manual_api",
         idempotency_key: str | None = None,
+        max_smtp_attempts: int | None = None,
+        retry_existing: bool = False,
     ) -> EmailSendResult:
         if report_id is None:
             reports = self.repository.list_reports(limit=1)
@@ -121,7 +123,8 @@ class EmailService:
             key,
         )
         if not created:
-            return EmailSendResult(delivery=delivery, duplicate=True)
+            if delivery.status == "sent" or not retry_existing:
+                return EmailSendResult(delivery=delivery, duplicate=True)
 
         if not recipient:
             delivery = self.repository.update_email_delivery(
@@ -155,7 +158,13 @@ class EmailService:
             return EmailSendResult(delivery=delivery, duplicate=False)
 
         message = _build_message(sender, recipient, subject, body)
-        for attempt_number in range(1, MAX_SMTP_ATTEMPTS + 1):
+        if max_smtp_attempts is None:
+            max_smtp_attempts = MAX_SMTP_ATTEMPTS
+        if isinstance(max_smtp_attempts, bool) or not isinstance(max_smtp_attempts, int) or not 1 <= max_smtp_attempts <= MAX_SMTP_ATTEMPTS:
+            raise ValueError("max_smtp_attempts must be between 1 and 3")
+        prior_attempts = self.repository.list_email_delivery_attempts(delivery.id)
+        first_attempt = (prior_attempts[-1].attempt_number + 1) if prior_attempts else 1
+        for attempt_number in range(first_attempt, first_attempt + max_smtp_attempts):
             try:
                 self._send_smtp_message(
                     host,
@@ -173,7 +182,7 @@ class EmailService:
                     failure.code,
                     failure.message,
                 )
-                should_retry = failure.retryable and attempt_number < MAX_SMTP_ATTEMPTS
+                should_retry = failure.retryable and attempt_number < first_attempt + max_smtp_attempts - 1
                 delivery = self.repository.update_email_delivery(
                     delivery.id,
                     "pending" if should_retry else "failed",
@@ -182,7 +191,7 @@ class EmailService:
                     retry_count=attempt_number - 1,
                 )
                 if should_retry:
-                    self.sleeper(_RETRY_DELAYS[attempt_number - 1])
+                    self.sleeper(_RETRY_DELAYS[min(attempt_number - 1, len(_RETRY_DELAYS) - 1)])
                     continue
                 return EmailSendResult(delivery=delivery, duplicate=False)
             else:

@@ -29,6 +29,7 @@ from .email import (
     build_report_email_body,
     classify_smtp_error,
 )
+from .scheduler import DailyDigestScheduler, Scheduler
 
 __all__ = [
     "DigestConfigurationError",
@@ -58,4 +59,6 @@ __all__ = [
     "ReportNotFoundError",
     "build_report_email_body",
     "classify_smtp_error",
+    "DailyDigestScheduler",
+    "Scheduler",
 ]

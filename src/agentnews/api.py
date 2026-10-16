@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -25,6 +28,7 @@ from .repositories import (
     SQLiteRepository,
     SourceArchiveStorage,
     UserPreferences,
+    normalize_daily_send_time,
 )
 from .services.chat import (
     ChatAgentError,
@@ -47,7 +51,9 @@ from .services.email import (
     EmailService,
     ReportContentUnavailableError,
     ReportNotFoundError,
+    _validate_email_address,
 )
+from .services.scheduler import DailyDigestScheduler
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +92,13 @@ class SettingsPayload(_StrictModel):
     timezone: str = "Asia/Shanghai"
     topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    daily_send_enabled: bool = Field(default=False, strict=True)
+    daily_send_time: str = "08:00"
+
+    @field_validator("daily_send_time")
+    @classmethod
+    def validate_daily_send_time(cls, value: str) -> str:
+        return normalize_daily_send_time(value)
 
 
 class SessionTitlePayload(_StrictModel):
@@ -115,6 +128,11 @@ def create_app(
     digest_service: DigestService | None = None,
     email_service: EmailService | None = None,
     settings: Settings | None = None,
+    scheduler: DailyDigestScheduler | Any | None = None,
+    scheduler_clock: Callable[[], datetime] | None = None,
+    scheduler_sleep: Callable[[float], Awaitable[None]] | None = None,
+    scheduler_poll_interval: float = 30.0,
+    scheduler_retry_delays: tuple[float, ...] = (1.0, 5.0),
 ) -> FastAPI:
     """Create an API application with replaceable service dependencies."""
 
@@ -247,7 +265,27 @@ def create_app(
         digest_handler=generate_digest_for_agent,
         email_handler=send_report_email_for_agent,
     )
-    app = FastAPI(title="AgentNews API", version="0.1.0")
+    resolved_scheduler = scheduler or DailyDigestScheduler(
+        app_repository,
+        get_digest_service,
+        email_service,
+        clock=scheduler_clock,
+        sleep=scheduler_sleep,
+        poll_interval=scheduler_poll_interval,
+        retry_delays=scheduler_retry_delays,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        resolved_scheduler.start()
+        try:
+            yield
+        finally:
+            stopped = resolved_scheduler.stop()
+            if inspect.isawaitable(stopped):
+                await stopped
+
+    app = FastAPI(title="AgentNews API", version="0.1.0", lifespan=lifespan)
     static_root = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_root), name="static")
     app.state.repository = app_repository
@@ -256,6 +294,7 @@ def create_app(
     app.state.email_service = email_service
     app.state.chat_run_manager = chat_run_manager
     app.state.settings = app_settings
+    app.state.scheduler = resolved_scheduler
 
     @app.get("/", include_in_schema=False)
     async def frontend() -> FileResponse:
@@ -414,16 +453,26 @@ def create_app(
 
     @app.get("/api/settings")
     async def get_settings_endpoint() -> dict[str, Any]:
-        return _preferences_to_dict(app_repository.get_preferences())
+        return _settings_response(app_repository, app_repository.get_preferences())
 
     @app.put("/api/settings")
     async def update_settings(payload: SettingsPayload) -> dict[str, Any]:
         try:
-            preferences = UserPreferences(**payload.model_dump())
+            existing = app_repository.get_preferences()
+            values = payload.model_dump()
+            if "daily_send_enabled" not in payload.model_fields_set:
+                values["daily_send_enabled"] = existing.daily_send_enabled
+            if "daily_send_time" not in payload.model_fields_set:
+                values["daily_send_time"] = existing.daily_send_time
+            preferences = UserPreferences(**values)
+            if preferences.daily_send_enabled:
+                _validate_automatic_send_configuration(preferences, app_settings)
             saved = app_repository.save_preferences(preferences)
+        except ApiError:
+            raise
         except (TypeError, ValueError):
             raise ApiError(422, "invalid_settings", "设置参数无效") from None
-        return _preferences_to_dict(saved)
+        return _settings_response(app_repository, saved)
 
     @app.post("/api/digest/run-once")
     async def run_digest_once() -> dict[str, Any]:
@@ -636,7 +685,55 @@ def _preferences_to_dict(preferences: UserPreferences) -> dict[str, Any]:
         "timezone": preferences.timezone,
         "topics": list(preferences.topics),
         "keywords": list(preferences.keywords),
+        "daily_send_enabled": preferences.daily_send_enabled,
+        "daily_send_time": preferences.daily_send_time,
     }
+
+
+def _settings_response(
+    repository: RepositoryProtocol,
+    preferences: UserPreferences,
+) -> dict[str, Any]:
+    response = _preferences_to_dict(preferences)
+    recent = repository.list_scheduled_runs(limit=1)
+    response["recent_scheduled_run"] = (
+        _scheduled_run_to_dict(recent[0]) if recent else None
+    )
+    return response
+
+
+def _scheduled_run_to_dict(run: Any) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "business_date": run.business_date.isoformat(),
+        "status": run.status,
+        "attempt_count": run.attempt_count,
+        "report_id": run.report_id,
+        "email_delivery_id": run.email_delivery_id,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "error_code": run.error_code,
+    }
+
+
+def _validate_automatic_send_configuration(
+    preferences: UserPreferences,
+    settings: Settings,
+) -> None:
+    if not preferences.email:
+        raise ApiError(422, "recipient_not_configured", "启用自动发送前请配置收件邮箱")
+    try:
+        _validate_email_address(preferences.email)
+    except ValueError:
+        raise ApiError(422, "invalid_recipient", "收件邮箱格式无效") from None
+    try:
+        host, _port, username, password, sender = settings.require_smtp()
+        _ = (host, username, password)
+        _validate_email_address(sender)
+    except ValueError:
+        raise ApiError(422, "smtp_not_configured", "启用自动发送前请完整配置 SMTP") from None
+    if not preferences.topics and not preferences.keywords:
+        raise ApiError(422, "invalid_digest_preferences", "至少配置一个日报主题或关键词")
 
 
 def _find_session(repository: RepositoryProtocol, session_id: str) -> ChatSession:
