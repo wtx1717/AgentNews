@@ -47,6 +47,7 @@ def test_bash_description_prioritizes_report_actions():
 
     assert "agentnews reports delete --id" in tool.description
     assert "ReportService" in tool.description
+    assert "Report generation is not a Bash action" in tool.description
 
 
 def test_executor_uses_fixed_process_boundary_and_bounded_output(tmp_path):

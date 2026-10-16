@@ -260,7 +260,9 @@ def create_bash_tool(
             "`agentnews reports search --keyword <text>`, "
             "`agentnews reports delete --id <positive integer>`, and "
             "`agentnews temp cleanup`. The report delete action also removes the "
-            "database record and associated source archives through ReportService."
+            "database record and associated source archives through ReportService. "
+            "Report generation is not a Bash action; do not invent or run "
+            "`agentnews reports generate`."
         ),
         args_schema=BashInput,
         handle_validation_error=_handle_validation_error,

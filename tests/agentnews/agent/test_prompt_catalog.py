@@ -51,6 +51,9 @@ def test_prompts_define_tool_search_write_and_reliability_rules():
     assert "不要先询问“是否执行”" in interaction
     assert "agentnews reports delete --id" in interaction
     assert "不要用 `Remove-Item`" in interaction
+    assert "DigestService" in interaction
+    assert "不得调用 Bash、PowerShell" in interaction
+    assert "agentnews reports generate" in interaction
     assert "新文件可以创建" in digest
     assert "不得覆盖" in digest
     assert "真实来源 URL" in digest
