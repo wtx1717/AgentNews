@@ -182,22 +182,54 @@ def test_frontend_and_static_assets_are_served_without_secrets_or_browser_storag
     page = client.get("/")
     stylesheet = client.get("/static/app.css")
     script = client.get("/static/app.js")
+    markdown_script = client.get("/static/markdown-render.js")
 
     assert page.status_code == stylesheet.status_code == script.status_code == 200
+    assert markdown_script.status_code == 200
     assert "text/html" in page.headers["content-type"]
     assert "text/css" in stylesheet.headers["content-type"]
     assert "javascript" in script.headers["content-type"]
+    assert "javascript" in markdown_script.headers["content-type"]
     assert '/static/app.css' in page.text
     assert '/static/app.js' in page.text
+    assert '/static/markdown-render.js' in page.text
 
     static_root = Path(api_module.__file__).parent / "static"
     frontend_source = "\n".join(path.read_text(encoding="utf-8") for path in static_root.iterdir())
     lowered_source = frontend_source.lower()
     for forbidden in ("sessionstorage", "api_key", "smtp", "password", "secret"):
         assert forbidden not in lowered_source
+    # Stored report and source text must never be injected as HTML.
+    assert "innerhtml" not in lowered_source
+    assert "insertadjacenthtml" not in lowered_source
     assert "currentSessionId" in script.text
     assert 'id="session-list"' in page.text
     assert 'id="sessions-archived"' in page.text
+
+
+def test_frontend_layout_keeps_settings_off_the_main_grid(tmp_path):
+    client = TestClient(create_app(settings=_settings(tmp_path), agent_runner=FakeRunner()))
+
+    page = client.get("/")
+    stylesheet = client.get("/static/app.css").text
+
+    # Preferences live in a topbar-triggered drawer, not beside the conversation.
+    assert 'id="settings-dialog"' in page.text
+    assert 'id="open-settings"' in page.text
+    assert 'id="close-settings"' in page.text
+    assert 'aria-controls="settings-dialog"' in page.text
+    assert 'id="preferences-form"' in page.text
+    assert 'class="preferences section-panel"' not in page.text
+    assert ".primary-grid" not in stylesheet
+    assert "min(1280px" not in stylesheet
+    assert "min(1680px" in stylesheet
+
+    # Markdown containers render into elements, not <pre> blocks.
+    assert 'id="detail-markdown" class="markdown-body"' in page.text
+    assert 'id="source-markdown" class="markdown-body"' in page.text
+    assert "height: 286px" not in stylesheet
+    assert ".markdown-body h1" in stylesheet
+    assert ".markdown-body table" in stylesheet
 
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):

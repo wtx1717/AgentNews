@@ -12,8 +12,15 @@ const state = {
   runPoller: null,
   reportOffset: 0,
   reportLimit: 10,
+  reportRequest: 0,
   selectedReportId: null,
+  detailRaw: false,
+  detailMarkdown: "",
+  sourceRequest: 0,
+  sourceRaw: false,
+  sourceMarkdown: "",
 };
+const markdown = window.AgentNewsMarkdown;
 const elements = {
   today: document.querySelector("#today-label"),
   newSession: document.querySelector("#new-session"),
@@ -49,6 +56,7 @@ const elements = {
   digestStatus: document.querySelector("#digest-status"),
   digestMessage: document.querySelector("#digest-message"),
   reportsStatus: document.querySelector("#reports-status"),
+  reportsError: document.querySelector("#reports-error"),
   reportList: document.querySelector("#report-list"),
   loadMore: document.querySelector("#load-more"),
   refreshReports: document.querySelector("#refresh-reports"),
@@ -62,12 +70,17 @@ const elements = {
   sendReportEmail: document.querySelector("#send-report-email"),
   resendReportEmail: document.querySelector("#resend-report-email"),
   detailMarkdown: document.querySelector("#detail-markdown"),
+  toggleDetailMarkdown: document.querySelector("#toggle-detail-markdown"),
   detailSources: document.querySelector("#detail-sources"),
   sourceViewer: document.querySelector("#source-viewer"),
   sourceUrl: document.querySelector("#source-original-url"),
   sourceSite: document.querySelector("#source-site"),
   sourceError: document.querySelector("#source-error"),
   sourceMarkdown: document.querySelector("#source-markdown"),
+  toggleSourceMarkdown: document.querySelector("#toggle-source-markdown"),
+  settingsDialog: document.querySelector("#settings-dialog"),
+  openSettings: document.querySelector("#open-settings"),
+  closeSettings: document.querySelector("#close-settings"),
 };
 
 function setStatus(element, status, message) {
@@ -124,7 +137,8 @@ async function finishChatRun(snapshot) {
     await loadSessionDetail(result.session_id || snapshot.session_id);
     await loadSessions("active");
     elements.toolCalls.textContent = String(result.tool_calls ?? 0);
-    setStatus(elements.chatStatus, "completed");
+    setSessionBusy(false);
+    setStatus(elements.chatStatus, "completed", `完成 · ${result.tool_calls ?? 0} 次工具调用`);
   } else {
     setStatus(elements.chatStatus, "failed");
     setError(elements.chatError, snapshot.error?.message || "Agent 运行失败，请稍后重试。")
@@ -272,6 +286,44 @@ function formatSessionTime(value) {
   }).format(date);
 }
 
+function iconNode(pathData) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", pathData);
+  svg.append(path);
+  return svg;
+}
+
+function renderMarkdown(container, text) {
+  if (!container) return;
+  if (markdown) markdown.renderMarkdownInto(container, text);
+  else container.textContent = text || "";
+}
+
+function renderRawText(container, text) {
+  container.replaceChildren();
+  const pre = document.createElement("pre");
+  pre.className = "markdown-code";
+  pre.textContent = text || "";
+  container.append(pre);
+}
+
+function renderDetailMarkdown() {
+  if (state.detailRaw) renderRawText(elements.detailMarkdown, state.detailMarkdown);
+  else renderMarkdown(elements.detailMarkdown, state.detailMarkdown);
+  elements.toggleDetailMarkdown.setAttribute("aria-pressed", String(state.detailRaw));
+  elements.toggleDetailMarkdown.textContent = state.detailRaw ? "查看排版" : "查看原文";
+}
+
+function renderSourceMarkdown() {
+  if (state.sourceRaw) renderRawText(elements.sourceMarkdown, state.sourceMarkdown);
+  else renderMarkdown(elements.sourceMarkdown, state.sourceMarkdown);
+  elements.toggleSourceMarkdown.setAttribute("aria-pressed", String(state.sourceRaw));
+  elements.toggleSourceMarkdown.textContent = state.sourceRaw ? "查看排版" : "查看原文";
+}
+
 function appendMessage(role, text) {
   const empty = elements.chatMessages.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -374,14 +426,14 @@ function makeSessionItem(session) {
   rename.className = "session-action session-control";
   rename.title = "重命名会话";
   rename.setAttribute("aria-label", "重命名会话");
-  rename.textContent = "改";
+  rename.append(iconNode("M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"));
   rename.addEventListener("click", () => renameSession(session));
   const transition = document.createElement("button");
   transition.type = "button";
   transition.className = "session-action session-control";
   transition.title = session.status === "active" ? "归档会话" : "恢复会话";
   transition.setAttribute("aria-label", transition.title);
-  transition.textContent = session.status === "active" ? "归" : "恢";
+  transition.append(iconNode("M4 7h16v13H4zM9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"));
   transition.addEventListener("click", () => session.status === "active"
     ? archiveSession(session)
     : restoreSession(session));
@@ -390,7 +442,7 @@ function makeSessionItem(session) {
   remove.className = "session-action session-action-delete session-control";
   remove.title = "永久删除会话";
   remove.setAttribute("aria-label", "永久删除会话");
-  remove.textContent = "删";
+  remove.append(iconNode("M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13M11 11v6M13 11v6"));
   remove.addEventListener("click", () => deleteSession(session));
   actions.append(rename, transition, remove);
   item.append(select, actions);
@@ -621,6 +673,7 @@ async function loadReports({ reset = false } = {}) {
     state.reportOffset = 0;
   }
   elements.reportsStatus.textContent = "读取中…";
+  setError(elements.reportsError, "");
   elements.loadMore.disabled = true;
   try {
     const page = await request(`/api/reports?limit=${state.reportLimit}&offset=${offset}`);
@@ -629,7 +682,8 @@ async function loadReports({ reset = false } = {}) {
     elements.loadMore.hidden = (page.items || []).length < state.reportLimit;
     elements.reportsStatus.textContent = state.reportOffset ? `${state.reportOffset} 份日报` : "无历史日报";
   } catch (error) {
-    elements.reportsStatus.textContent = `失败：${error.message}`;
+    elements.reportsStatus.textContent = "读取失败";
+    setError(elements.reportsError, `日报列表读取失败：${error.message}`);
   } finally {
     elements.loadMore.disabled = false;
   }
@@ -667,18 +721,22 @@ function renderSource(source) {
 }
 
 async function loadReport(reportId) {
+  const requestId = ++state.reportRequest;
   elements.detailPlaceholder.textContent = "读取中…";
   elements.detailPlaceholder.hidden = false;
   elements.reportDetail.hidden = true;
   try {
     const report = await request(`/api/reports/${encodeURIComponent(reportId)}`);
+    if (requestId !== state.reportRequest) return;
     state.selectedReportId = report.id;
     elements.detailDate.textContent = report.date || "";
     elements.detailSourceCount.textContent = `${(report.sources || []).length} 个来源`;
     elements.detailTitle.textContent = report.title || "未命名日报";
     elements.detailSummary.textContent = report.summary || "";
     renderEmailDeliveryStatus(report.email_deliveries || []);
-    elements.detailMarkdown.textContent = report.markdown || "";
+    state.detailMarkdown = report.markdown || "";
+    state.detailRaw = false;
+    renderDetailMarkdown();
     elements.detailSources.replaceChildren(...(report.sources || []).map(renderSource));
     elements.detailPlaceholder.hidden = true;
     elements.reportDetail.hidden = false;
@@ -687,6 +745,7 @@ async function loadReport(reportId) {
     }
     elements.sourceViewer.hidden = true;
   } catch (error) {
+    if (requestId !== state.reportRequest) return;
     elements.detailPlaceholder.textContent = `读取失败：${error.message}`;
   }
 }
@@ -727,21 +786,28 @@ async function sendReportEmail(resend) {
 }
 
 async function loadSource(sourceId) {
+  const requestId = ++state.sourceRequest;
   elements.sourceViewer.hidden = false;
   elements.sourceViewer.scrollIntoView({ behavior: "smooth", block: "start" });
   setError(elements.sourceError, "");
-  elements.sourceMarkdown.textContent = "读取中…";
+  state.sourceRaw = false;
+  state.sourceMarkdown = "";
+  renderMarkdown(elements.sourceMarkdown, "读取中…");
   elements.sourceUrl.textContent = "";
   elements.sourceUrl.removeAttribute("href");
   try {
     const source = await request(`/api/sources/${encodeURIComponent(sourceId)}`);
+    if (requestId !== state.sourceRequest) return;
     const url = safeHttpUrl(source.url || "");
     elements.sourceUrl.textContent = url || "原始 URL 不可用";
     if (url) elements.sourceUrl.href = url;
     elements.sourceSite.textContent = source.source_name || "";
-    elements.sourceMarkdown.textContent = source.markdown || "该来源没有正文归档。";
+    state.sourceMarkdown = source.markdown || "该来源没有正文归档。";
+    renderSourceMarkdown();
   } catch (error) {
-    elements.sourceMarkdown.textContent = "";
+    if (requestId !== state.sourceRequest) return;
+    state.sourceMarkdown = "";
+    renderMarkdown(elements.sourceMarkdown, "");
     setError(elements.sourceError, error.message);
   }
 }
@@ -828,6 +894,19 @@ elements.resendReportEmail.addEventListener("click", () => sendReportEmail(true)
 elements.refreshReports.addEventListener("click", () => loadReports({ reset: true }));
 elements.loadMore.addEventListener("click", () => loadReports());
 document.querySelector("#close-source").addEventListener("click", () => { elements.sourceViewer.hidden = true; });
+elements.toggleDetailMarkdown.addEventListener("click", () => {
+  state.detailRaw = !state.detailRaw;
+  renderDetailMarkdown();
+});
+elements.toggleSourceMarkdown.addEventListener("click", () => {
+  state.sourceRaw = !state.sourceRaw;
+  renderSourceMarkdown();
+});
+elements.openSettings.addEventListener("click", () => {
+  if (!elements.settingsDialog.open) elements.settingsDialog.showModal();
+});
+elements.closeSettings.addEventListener("click", () => elements.settingsDialog.close());
+elements.settingsDialog.addEventListener("close", () => elements.openSettings.focus());
 
 loadPreferences();
 initializeSessions();
