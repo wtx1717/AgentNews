@@ -231,6 +231,9 @@ def test_frontend_layout_keeps_settings_off_the_main_grid(tmp_path):
     assert ".markdown-body h1" in stylesheet
     assert ".markdown-body table" in stylesheet
 
+    # Report deletion lives in the page markup.
+    assert 'id="delete-report"' in page.text
+
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):
     repository = RecordingRepository()

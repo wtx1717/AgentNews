@@ -7,13 +7,16 @@ const state = {
   sessionView: "active",
   sessionRequest: 0,
   sessionBusy: false,
-  pendingRunId: null,
+  // One active run per session, mirroring the backend's per-session lock.
+  activeRuns: new Map(),
+  dialogRunId: null,
   pendingApprovalId: null,
   runPoller: null,
   reportOffset: 0,
   reportLimit: 10,
   reportRequest: 0,
   selectedReportId: null,
+  selectedReport: null,
   detailRaw: false,
   detailMarkdown: "",
   sourceRequest: 0,
@@ -62,6 +65,7 @@ const elements = {
   refreshReports: document.querySelector("#refresh-reports"),
   detailPlaceholder: document.querySelector("#detail-placeholder"),
   reportDetail: document.querySelector("#report-detail"),
+  deleteReport: document.querySelector("#delete-report"),
   detailDate: document.querySelector("#detail-date"),
   detailSourceCount: document.querySelector("#detail-source-count"),
   detailTitle: document.querySelector("#detail-title"),
@@ -118,6 +122,7 @@ function renderBashApproval(approval) {
 function closeBashApproval() {
   if (elements.bashDialog.open) elements.bashDialog.close();
   state.pendingApprovalId = null;
+  state.dialogRunId = null;
   setError(elements.bashError, "");
 }
 
@@ -128,74 +133,151 @@ function stopRunPolling() {
   }
 }
 
-async function finishChatRun(snapshot) {
-  stopRunPolling();
-  state.pendingRunId = null;
-  closeBashApproval();
-  if (snapshot.status === "completed") {
-    const result = snapshot.result || {};
-    await loadSessionDetail(result.session_id || snapshot.session_id);
-    await loadSessions("active");
-    elements.toolCalls.textContent = String(result.tool_calls ?? 0);
-    setSessionBusy(false);
-    setStatus(elements.chatStatus, "completed", `完成 · ${result.tool_calls ?? 0} 次工具调用`);
-  } else {
-    setStatus(elements.chatStatus, "failed");
-    setError(elements.chatError, snapshot.error?.message || "Agent 运行失败，请稍后重试。")
-  }
-  setSessionBusy(false);
-  elements.chatInput.focus();
+function runForSession(sessionId) {
+  if (!sessionId) return null;
+  return state.activeRuns.get(sessionId) || null;
 }
 
-async function handleChatRunSnapshot(snapshot) {
-  if (snapshot.status === "pending_approval" && snapshot.approval) {
+function syncRunPolling() {
+  if (state.activeRuns.size === 0) stopRunPolling();
+  else startRunPolling();
+}
+
+function markSessionRun(sessionId, runId) {
+  if (!sessionId) return;
+  state.activeRuns.set(sessionId, { runId, status: "running", approval: null });
+  updateSessionRunIndicators();
+  updateChatAvailability();
+}
+
+function clearSessionRun(sessionId) {
+  if (!sessionId) return;
+  if (state.dialogRunId && state.activeRuns.get(sessionId)?.runId === state.dialogRunId) {
+    closeBashApproval();
+  }
+  state.activeRuns.delete(sessionId);
+  updateSessionRunIndicators();
+  updateChatAvailability();
+  if (state.activeRuns.size === 0) stopRunPolling();
+}
+
+function updateSessionRunIndicators() {
+  for (const item of elements.sessionList.querySelectorAll(".session-item")) {
+    const run = runForSession(item.dataset.sessionId);
+    item.classList.toggle("session-item-run", Boolean(run));
+    item.setAttribute("aria-busy", String(Boolean(run)));
+    const select = item.querySelector(".session-select");
+    if (!select) continue;
+    let dot = select.querySelector(".session-run-dot");
+    if (run && !dot) {
+      dot = document.createElement("span");
+      dot.className = "session-run-dot";
+      dot.setAttribute("aria-hidden", "true");
+      select.append(dot);
+    } else if (!run && dot) {
+      dot.remove();
+    }
+  }
+}
+
+function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {}) {
+  const run = runForSession(sessionId);
+  if (run) {
+    run.status = snapshot.status;
+    run.approval = snapshot.approval || null;
+  }
+  if (state.sessionId === sessionId) {
+    if (snapshot.status === "pending_approval") setStatus(elements.chatStatus, "pending_approval");
+    else if (snapshot.status === "running") setStatus(elements.chatStatus, "running");
+  }
+  if (snapshot.status === "pending_approval" && snapshot.approval && showDialog) {
+    // The approval dialog is modal, so surface the session it belongs to.
+    if (state.sessionId !== sessionId) loadSessionDetail(sessionId);
+    state.dialogRunId = snapshot.run_id;
     state.pendingRunId = snapshot.run_id;
-    setStatus(elements.chatStatus, "pending_approval");
     renderBashApproval(snapshot.approval);
+  }
+  updateSessionRunIndicators();
+}
+
+async function finishChatRun(sessionId, snapshot) {
+  const isCurrent = () => state.sessionId === sessionId;
+  clearSessionRun(sessionId);
+  const result = snapshot.result || {};
+  if (snapshot.status === "completed") {
+    if (isCurrent()) {
+      await loadSessionDetail(sessionId);
+      elements.toolCalls.textContent = String(result.tool_calls ?? 0);
+      setStatus(elements.chatStatus, "completed", `完成 · ${result.tool_calls ?? 0} 次工具调用`);
+    }
+  } else if (isCurrent()) {
+    setStatus(elements.chatStatus, "failed");
+    setError(elements.chatError, snapshot.error?.message || "Agent 运行失败，请稍后重试。");
+  }
+  await loadSessions(state.sessionView);
+  if (isCurrent()) {
+    updateChatAvailability();
+    elements.chatInput.focus();
+  }
+}
+
+async function handleChatRunSnapshot(sessionId, snapshot) {
+  if (snapshot.status === "running") {
+    applySnapshotToSession(sessionId, snapshot);
     return;
   }
-  if (snapshot.status === "running") {
-    closeBashApproval();
-    setStatus(elements.chatStatus, "running");
+  if (snapshot.status === "pending_approval" && snapshot.approval) {
+    applySnapshotToSession(sessionId, snapshot);
     return;
   }
   if (["completed", "failed", "expired"].includes(snapshot.status)) {
-    await finishChatRun(snapshot);
+    await finishChatRun(sessionId, snapshot);
   }
 }
 
-async function pollChatRun() {
-  if (!state.pendingRunId) return;
-  try {
-    const snapshot = await request(`/api/chat/runs/${encodeURIComponent(state.pendingRunId)}`);
-    await handleChatRunSnapshot(snapshot);
-  } catch (error) {
+async function pollChatRuns() {
+  if (state.activeRuns.size === 0) {
     stopRunPolling();
-    closeBashApproval();
-    setStatus(elements.chatStatus, "failed");
-    setError(elements.chatError, error.message);
-    state.pendingRunId = null;
-    setSessionBusy(false);
+    return;
+  }
+  for (const [sessionId, run] of [...state.activeRuns]) {
+    try {
+      const snapshot = await request(`/api/chat/runs/${encodeURIComponent(run.runId)}`);
+      await handleChatRunSnapshot(sessionId, snapshot);
+    } catch (error) {
+      clearSessionRun(sessionId);
+      if (state.sessionId === sessionId) {
+        setStatus(elements.chatStatus, "failed");
+        setError(elements.chatError, error.message);
+      }
+    }
   }
 }
 
 function startRunPolling() {
-  stopRunPolling();
-  state.runPoller = window.setInterval(pollChatRun, 600);
+  if (state.runPoller !== null) return;
+  state.runPoller = window.setInterval(pollChatRuns, 600);
 }
 
 async function submitBashApproval(decision) {
   if (!state.pendingRunId || !state.pendingApprovalId) return;
+  const runId = state.pendingRunId;
+  const sessionId = [...state.activeRuns.entries()].find(([, run]) => run.runId === runId)?.[0] || null;
   elements.bashApprove.disabled = true;
   elements.bashReject.disabled = true;
   setError(elements.bashError, "");
   try {
     const snapshot = await request(
-      `/api/chat/runs/${encodeURIComponent(state.pendingRunId)}/approvals/${encodeURIComponent(state.pendingApprovalId)}`,
+      `/api/chat/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(state.pendingApprovalId)}`,
       { method: "POST", body: JSON.stringify({ decision }) },
     );
-    await handleChatRunSnapshot(snapshot);
-    if (snapshot.status === "running" || snapshot.status === "pending_approval") startRunPolling();
+    const decisionSessionId = snapshot.session_id || sessionId;
+    if (decisionSessionId) applySnapshotToSession(decisionSessionId, snapshot, { showDialog: false });
+    if (snapshot.status === "completed" || snapshot.status === "failed" || snapshot.status === "expired") {
+      await finishChatRun(decisionSessionId, snapshot);
+    } else {
+      syncRunPolling();
+    }
   } catch (error) {
     setError(elements.bashError, error.message);
     elements.bashApprove.disabled = false;
@@ -354,14 +436,33 @@ function renderMessages(messages) {
 
 function updateChatAvailability() {
   const archived = state.sessionStatus === "archived";
-  elements.chatInput.disabled = state.sessionBusy || archived;
-  elements.chatForm.querySelector("button[type=submit]").disabled = state.sessionBusy || archived;
+  const run = runForSession(state.sessionId);
+  const sendButton = elements.chatForm.querySelector("button[type=submit]");
+  // Only this conversation is locked while its own run is in flight; the rest
+  // of the workspace stays usable.
+  elements.chatInput.disabled = archived;
+  sendButton.disabled = archived || Boolean(run) || state.sessionBusy;
+  sendButton.title = run ? "当前会话正在处理，请等待本轮结束" : "发送消息";
+  elements.chatInput.placeholder = run ? "当前会话正在处理，可先输入内容…" : "输入消息…";
   elements.restoreCurrent.hidden = !archived;
+  updateSessionControlUsability();
+}
+
+/** Re-apply per-session button state after the list is re-rendered. */
+function updateSessionControlUsability() {
+  for (const item of elements.sessionList.querySelectorAll(".session-item")) {
+    const busy = Boolean(runForSession(item.dataset.sessionId));
+    const remove = item.querySelector(".session-action-delete");
+    if (!remove) continue;
+    // Deleting a session whose run is in flight discards that run's result, so
+    // say so; the button itself stays available.
+    remove.dataset.baseTitle = remove.dataset.baseTitle || remove.title;
+    remove.title = busy ? "该会话正在处理中，删除会丢弃本轮结果" : remove.dataset.baseTitle;
+  }
 }
 
 function setSessionBusy(busy) {
   state.sessionBusy = busy;
-  for (const control of document.querySelectorAll(".session-control")) control.disabled = busy;
   updateChatAvailability();
 }
 
@@ -468,6 +569,7 @@ async function loadSessions(status = state.sessionView) {
   try {
     const page = await request(`/api/sessions?status=${status}&limit=100&offset=0`);
     renderSessionList(page.items || []);
+    updateSessionRunIndicators();
     elements.sessionsStatus.textContent = page.items?.length ? `${page.items.length} 个会话` : "暂无会话";
   } catch (error) {
     renderSessionList([]);
@@ -479,9 +581,8 @@ async function loadSessions(status = state.sessionView) {
 async function loadSessionDetail(sessionId, { initial = false } = {}) {
   if (!sessionId) return;
   const requestId = ++state.sessionRequest;
-  setSessionBusy(true);
   setError(elements.chatError, "");
-  setStatus(elements.chatStatus, "running", "读取会话中…");
+  if (!runForSession(sessionId)) setStatus(elements.chatStatus, "running", "读取会话中…");
   try {
     const session = await request(`/api/sessions/${encodeURIComponent(sessionId)}`);
     if (requestId !== state.sessionRequest) return;
@@ -502,8 +603,14 @@ async function loadSessionDetail(sessionId, { initial = false } = {}) {
     }
   } finally {
     if (requestId === state.sessionRequest) {
-      setSessionBusy(false);
-      if (state.sessionStatus !== "archived" && state.sessionId) setStatus(elements.chatStatus, "idle");
+      const run = runForSession(state.sessionId);
+      if (run) {
+        // A run owns the status label for its own conversation.
+        setStatus(elements.chatStatus, run.status === "pending_approval" ? "pending_approval" : "running");
+      } else if (state.sessionStatus !== "archived" && state.sessionId) {
+        setStatus(elements.chatStatus, "idle");
+      }
+      updateChatAvailability();
     }
   }
 }
@@ -583,10 +690,13 @@ async function restoreSession(session) {
 
 async function deleteSession(session) {
   if (state.sessionBusy) return;
-  if (!window.confirm(`永久删除“${session.title || "未命名会话"}”？此操作不可恢复。`)) return;
+  const running = Boolean(runForSession(session.id));
+  const warning = running ? "该会话正在处理中，删除后本轮结果将被丢弃。" : "";
+  if (!window.confirm(`永久删除“${session.title || "未命名会话"}”？${warning}此操作不可恢复。`)) return;
   setSessionBusy(true);
   try {
     await request(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+    clearSessionRun(session.id);
     if (state.sessionId === session.id) clearCurrentSession();
     await loadSessions(state.sessionView);
   } catch (error) {
@@ -599,37 +709,46 @@ async function deleteSession(session) {
 async function sendChat(event) {
   event.preventDefault();
   const message = elements.chatInput.value.trim();
-  if (!message || state.sessionStatus === "archived" || state.sessionBusy) return;
-  const button = elements.chatForm.querySelector("button");
   const requestSessionId = state.sessionId;
-  setSessionBusy(true);
+  if (!message || state.sessionStatus === "archived") return;
+  if (runForSession(requestSessionId) || state.sessionBusy) {
+    setError(elements.chatError, "当前会话正在处理，请等待本轮结束再发送。");
+    return;
+  }
   setError(elements.chatError, "");
   setStatus(elements.chatStatus, "running");
   appendMessage("user", message);
   elements.chatInput.value = "";
-  let pendingApproval = false;
+  markSessionRun(requestSessionId, "pending");
   try {
     const result = await request("/api/chat", {
       method: "POST",
       body: JSON.stringify({ session_id: requestSessionId, message }),
     });
-    if (result.status === "pending_approval") {
-      pendingApproval = true;
-      state.pendingRunId = result.run_id;
-      await handleChatRunSnapshot(result);
-      startRunPolling();
+    // The reply is either a finished run's result or a run that is still going;
+    // the session for a new run comes back in `session_id`, not in the result.
+    if (result.status === "pending_approval" || result.status === "running") {
+      const runSessionId = result.session_id || requestSessionId;
+      markSessionRun(runSessionId, result.run_id);
+      applySnapshotToSession(runSessionId, result);
+      syncRunPolling();
     } else {
-      await finishChatRun({ status: "completed", result });
+      const finishedSessionId = result.session_id || requestSessionId;
+      await finishChatRun(finishedSessionId, { status: "completed", result, session_id: finishedSessionId });
+      return;
     }
   } catch (error) {
-    setStatus(elements.chatStatus, "failed");
-    setError(elements.chatError, error.message);
-  } finally {
-    if (!pendingApproval) {
-      button.disabled = false;
-      setSessionBusy(false);
-      elements.chatInput.focus();
+    clearSessionRun(requestSessionId);
+    if (error.code === "run_busy") {
+      setError(elements.chatError, error.message);
+      if (state.sessionId === requestSessionId) setStatus(elements.chatStatus, "running");
+    } else {
+      setStatus(elements.chatStatus, "failed");
+      setError(elements.chatError, error.message);
     }
+  } finally {
+    if (state.sessionId === requestSessionId) elements.chatInput.focus();
+    updateChatAvailability();
   }
 }
 
@@ -643,11 +762,15 @@ function safeHttpUrl(value) {
 }
 
 function makeReportItem(report) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "report-item";
-  button.dataset.reportId = String(report.id);
-  button.setAttribute("aria-current", String(report.id === state.selectedReportId));
+  const item = document.createElement("article");
+  item.className = "report-item";
+  item.dataset.reportId = String(report.id);
+  item.setAttribute("aria-current", String(report.id === state.selectedReportId));
+
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "report-select";
+  select.title = "打开日报";
   const top = document.createElement("span");
   top.className = "report-item-top";
   const date = document.createElement("time");
@@ -661,9 +784,62 @@ function makeReportItem(report) {
   const summary = document.createElement("span");
   summary.className = "report-item-summary";
   summary.textContent = report.summary || "暂无摘要";
-  button.append(top, title, summary);
-  button.addEventListener("click", () => loadReport(report.id));
-  return button;
+  select.append(top, title, summary);
+  select.addEventListener("click", () => loadReport(report.id));
+
+  const actions = document.createElement("span");
+  actions.className = "report-actions";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "report-action report-action-delete";
+  remove.title = "删除日报";
+  remove.setAttribute("aria-label", `删除日报 ${report.date || ""} ${report.title || ""}`.trim());
+  remove.append(iconNode("M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13M11 11v6M13 11v6"));
+  remove.addEventListener("click", () => deleteReport(report));
+  actions.append(remove);
+
+  item.append(select, actions);
+  return item;
+}
+
+function reportTitleOf(report) {
+  return `「${report.title || "未命名日报"}」${report.date ? `（${report.date}）` : ""}`;
+}
+
+async function deleteReport(report) {
+  if (!report) return;
+  const confirmed = window.confirm(
+    `永久删除${reportTitleOf(report)}？日报文件、来源归档与邮件发送记录将一并清理，且不可恢复。`,
+  );
+  if (!confirmed) return;
+  const remaining = (state.selectedReportId === report.id)
+    ? null
+    : state.selectedReportId;
+  const requestId = ++state.reportRequest;
+  setError(elements.reportsError, "");
+  try {
+    await request(`/api/reports/${encodeURIComponent(report.id)}`, { method: "DELETE" });
+  } catch (error) {
+    if (requestId !== state.reportRequest) return;
+    // The row stays visible so the user can retry.
+    setError(elements.reportsError, `删除日报失败：${error.message}`);
+    return;
+  }
+  if (requestId !== state.reportRequest) return;
+  state.selectedReportId = remaining;
+  await loadReports({ reset: true });
+  const items = elements.reportList.querySelectorAll(".report-item");
+  if (!items.length) {
+    elements.detailPlaceholder.textContent = "选择一份日报查看内容";
+    elements.detailPlaceholder.hidden = false;
+    elements.reportDetail.hidden = true;
+    elements.deleteReport.hidden = true;
+    return;
+  }
+  const next = state.selectedReportId != null
+    ? [...items].find((item) => Number(item.dataset.reportId) === state.selectedReportId)
+    : null;
+  await loadReport(Number((next || items[0]).dataset.reportId));
 }
 
 async function loadReports({ reset = false } = {}) {
@@ -725,10 +901,12 @@ async function loadReport(reportId) {
   elements.detailPlaceholder.textContent = "读取中…";
   elements.detailPlaceholder.hidden = false;
   elements.reportDetail.hidden = true;
+  elements.deleteReport.hidden = true;
   try {
     const report = await request(`/api/reports/${encodeURIComponent(reportId)}`);
     if (requestId !== state.reportRequest) return;
     state.selectedReportId = report.id;
+    state.selectedReport = report;
     elements.detailDate.textContent = report.date || "";
     elements.detailSourceCount.textContent = `${(report.sources || []).length} 个来源`;
     elements.detailTitle.textContent = report.title || "未命名日报";
@@ -740,12 +918,14 @@ async function loadReport(reportId) {
     elements.detailSources.replaceChildren(...(report.sources || []).map(renderSource));
     elements.detailPlaceholder.hidden = true;
     elements.reportDetail.hidden = false;
+    elements.deleteReport.hidden = false;
     for (const item of elements.reportList.querySelectorAll(".report-item")) {
       item.setAttribute("aria-current", String(Number(item.dataset.reportId) === report.id));
     }
     elements.sourceViewer.hidden = true;
   } catch (error) {
     if (requestId !== state.reportRequest) return;
+    state.selectedReport = null;
     elements.detailPlaceholder.textContent = `读取失败：${error.message}`;
   }
 }
@@ -893,6 +1073,7 @@ elements.sendReportEmail.addEventListener("click", () => sendReportEmail(false))
 elements.resendReportEmail.addEventListener("click", () => sendReportEmail(true));
 elements.refreshReports.addEventListener("click", () => loadReports({ reset: true }));
 elements.loadMore.addEventListener("click", () => loadReports());
+elements.deleteReport.addEventListener("click", () => deleteReport(state.selectedReport));
 document.querySelector("#close-source").addEventListener("click", () => { elements.sourceViewer.hidden = true; });
 elements.toggleDetailMarkdown.addEventListener("click", () => {
   state.detailRaw = !state.detailRaw;

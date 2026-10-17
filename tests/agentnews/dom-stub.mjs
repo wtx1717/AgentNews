@@ -49,6 +49,28 @@ export class FakeElement {
     return this.attributes.get("class") || "";
   }
 
+  get classList() {
+    const element = this;
+    const read = () => String(element.className).split(/\s+/).filter(Boolean);
+    const write = (values) => {
+      const unique = [...new Set(values)];
+      if (unique.length) element.setAttribute("class", unique.join(" "));
+      else element.removeAttribute("class");
+    };
+    return {
+      contains: (name) => read().includes(name),
+      add: (name) => write([...read(), name]),
+      remove: (name) => write(read().filter((item) => item !== name)),
+      toggle: (name, force) => {
+        const has = read().includes(name);
+        const next = force === undefined ? !has : Boolean(force);
+        if (next && !has) write([...read(), name]);
+        if (!next && has) write(read().filter((item) => item !== name));
+        return next;
+      },
+    };
+  }
+
   set type(value) {
     this.attributes.set("type", String(value));
   }
@@ -65,8 +87,7 @@ export class FakeElement {
     return this.attributes.get("href") || "";
   }
 
-  /** data-* attributes, mirroring the DOMStringMap the frontend writes to. */
-  get dataset() {
+  /** data-* attributes, mirroring the DOMStringMap the frontend writes to. */  get dataset() {
     const element = this;
     return new Proxy(
       {},
@@ -161,8 +182,17 @@ export class FakeElement {
   }
 
   dispatch(type, event = {}) {
-    const payload = { type, target: this, preventDefault() {}, ...event };
+    const payload = { type, target: this, preventDefault() {}, stopPropagation() {}, ...event };
     for (const handler of this.listeners.get(type) || []) handler(payload);
+    return payload;
+  }
+
+  press(key, options = {}) {
+    return this.dispatch("keydown", { key, shiftKey: false, isComposing: false, keyCode: 13, ...options });
+  }
+
+  requestSubmit() {
+    this.dispatch("submit", {});
   }
 
   showModal() {
@@ -224,7 +254,7 @@ export function descendants(root) {
 function parseSimpleSelector(part) {
   const withId = /^#([\w-]+)$/.exec(part);
   if (withId) return { id: withId[1] };
-  const match = /^([a-zA-Z][\w-]*)?(?:\.([\w-]+))?(?:\[([\w-]+)(?:=["']?([^\]"']*)["']?)?\])?$/.exec(part);
+  const match = /^([a-zA-Z][\w-]*)?(?:\.([\w-]+))?(?:\[([\w:-]+)(?:=["']?([^\]"']*)["']?)?\])?$/.exec(part);
   if (!match) return null;
   return { tag: match[1] || null, className: match[2] || null, attr: match[3] || null, attrValue: match[4] };
 }
@@ -289,8 +319,9 @@ export function createDocument() {
       return document.elementsById.get(String(id)) || null;
     },
     querySelector(selector) {
-      if (selector.startsWith("#")) return document.getElementById(selector.slice(1));
-      return document.querySelectorAll(selector)[0] || null;
+      const value = String(selector).trim();
+      if (/^#[\w-]+$/.test(value)) return document.getElementById(value.slice(1));
+      return document.querySelectorAll(value)[0] || null;
     },
     querySelectorAll(selector) {
       return querySelectorAll(document.root, selector);

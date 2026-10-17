@@ -70,10 +70,10 @@ function createAppHarness({ html, responses, prompts = [] } = {}) {
       ["button", { type: "submit" }],
     ],
   });
-
   const calls = [];
   const timers = [];
   const storage = new Map();
+  const answers = { prompt: [...prompts], confirm: [...prompts] };
   const callsFor = (path) =>
     calls.filter((call) => (call.search ? `${call.path}${call.search}` : call.path) === path);
 
@@ -83,8 +83,9 @@ function createAppHarness({ html, responses, prompts = [] } = {}) {
       setItem: (key, value) => storage.set(key, String(value)),
       removeItem: (key) => storage.delete(key),
     },
-    prompt: () => (prompts.length ? prompts.shift() : null),
-    confirm: () => Boolean(prompts.length ? prompts.shift() : true),
+    // Mutable so a test can answer the next confirmation differently.
+    prompt: () => (answers.prompt.length ? answers.prompt.shift() : null),
+    confirm: () => Boolean(answers.confirm.length ? answers.confirm.shift() : true),
     setInterval: (handler) => {
       timers.push(handler);
       return timers.length;
@@ -126,6 +127,7 @@ function createAppHarness({ html, responses, prompts = [] } = {}) {
     callsFor,
     timers,
     storage,
+    windowMock,
     restore() {
       for (const [name, value] of previousGlobals) {
         if (value === undefined) delete globalThis[name];
@@ -352,7 +354,7 @@ test("opening a report renders markdown structure instead of raw text", async ()
     const { document } = harness;
     const reportItem = document.querySelectorAll(".report-item")[0];
     assert.ok(reportItem, "expected one rendered report");
-    reportItem.click();
+    reportItem.querySelector(".report-select").click();
     await settle();
     const detail = document.querySelector("#detail-markdown");
     const tags = tagNames(detail);
@@ -367,11 +369,17 @@ test("opening a report renders markdown structure instead of raw text", async ()
   }
 });
 
+function openFirstReport(document) {
+  const item = document.querySelectorAll(".report-item")[0];
+  assert.ok(item, "expected a rendered report to open");
+  item.querySelector(".report-select").click();
+}
+
 test("the raw toggle swaps between rendered markdown and source text", async () => {
   const harness = await startApp({ storedSession: "s1" });
   try {
     const { document } = harness;
-    document.querySelectorAll(".report-item")[0].click();
+    openFirstReport(document);
     await settle();
     const toggle = document.querySelector("#toggle-detail-markdown");
     const detail = document.querySelector("#detail-markdown");
@@ -394,7 +402,7 @@ test("source markdown renders in the viewer and closes again", async () => {
   const harness = await startApp({ storedSession: "s1" });
   try {
     const { document } = harness;
-    document.querySelectorAll(".report-item")[0].click();
+    openFirstReport(document);
     await settle();
     const archiveButton = document.querySelectorAll(".source-actions button")[0];
     assert.ok(archiveButton, "expected an archive button for the source");
@@ -633,7 +641,9 @@ test("an approval request blocks input, resumes the run and completes", async ()
     assert.equal(dialog.open, true);
     assert.equal(document.querySelector("#bash-approval-command").textContent, "Write-Output 'ok'");
     assert.equal(document.querySelector("#bash-approval-cwd").textContent, "D:\\workspace");
-    assert.equal(document.querySelector("#chat-input").disabled, true);
+    // The input stays typable; only sending is blocked for this conversation.
+    assert.equal(document.querySelector("#chat-input").disabled, false);
+    assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, true);
     assert.equal(document.querySelector("#chat-status").textContent, "等待人工审核");
 
     document.querySelector("#bash-approve").click();
@@ -643,7 +653,7 @@ test("an approval request blocks input, resumes the run and completes", async ()
     assert.equal(dialog.open, false);
     assert.equal(document.querySelector("#chat-status").textContent, "完成 · 2 次工具调用");
     assert.equal(document.querySelector("#tool-call-count").textContent, "2");
-    assert.equal(document.querySelector("#chat-input").disabled, false);
+    assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, false);
     assert.equal(harness.callsFor("/api/chat/runs/r1/approvals/a1").length, 1);
     assert.ok(harness.callsFor("/api/chat/runs/r1").length >= 1);
   } finally {
@@ -737,6 +747,117 @@ test("stored content is never injected as markup", async () => {
   try {
     assert.equal(typeof harness.document.createElement("div").insertAdjacentHTML, "undefined");
     assert.equal(appSource.toLowerCase().includes("innerhtml"), false);
+  } finally {
+    harness.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+const SECOND_REPORT = {
+  id: 2,
+  date: "2026-10-17",
+  title: "第二份日报",
+  summary: "摘要二",
+  source_count: 0,
+};
+const SECOND_REPORT_DETAIL = {
+  id: 2,
+  date: "2026-10-17",
+  title: "第二份日报",
+  summary: "摘要二",
+  markdown: "# 第二份\n\n正文",
+  sources: [],
+  email_deliveries: [],
+};
+
+function twoReportResponses(overrides = {}) {
+  let deleted = false;
+  return {
+    "GET /api/reports": () => ({
+      __body: deleted ? { items: [SECOND_REPORT], limit: 10, offset: 0 } : { ...REPORT_LIST, items: [...REPORT_LIST.items, SECOND_REPORT] },
+    }),
+    "DELETE /api/reports/1": () => {
+      deleted = true;
+      return { status: 204 };
+    },
+    "GET /api/reports/2": { __body: SECOND_REPORT_DETAIL },
+    ...overrides,
+  };
+}
+
+test("deleting a report asks for confirmation and refreshes the list", async () => {
+  const harness = await startApp({ storedSession: "s1", responses: twoReportResponses() });
+  try {
+    const { document } = harness;
+    assert.equal(document.querySelectorAll(".report-item").length, 2);
+
+    // Cancel first: no request, nothing removed.
+    harness.windowMock.confirm = () => false;
+    document.querySelectorAll(".report-delete, .report-action-delete")[0].click();
+    await settle();
+    assert.equal(harness.callsFor("/api/reports/1").some((call) => call.method === "DELETE"), false);
+    assert.equal(document.querySelectorAll(".report-item").length, 2);
+
+    // Confirm: the report is deleted and the list reloads.
+    harness.windowMock.confirm = () => true;
+    document.querySelectorAll(".report-action-delete")[0].click();
+    await settle();
+    assert.equal(harness.callsFor("/api/reports/1").some((call) => call.method === "DELETE"), true);
+    assert.ok(harness.callsFor("/api/reports?limit=10&offset=0").length >= 2);
+    assert.equal(document.querySelectorAll(".report-item").length, 1);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("deleting the last report returns to the empty detail state", async () => {
+  let deleted = false;
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      "DELETE /api/reports/1": () => {
+        deleted = true;
+        return { status: 204 };
+      },
+      "GET /api/reports": () => ({ __body: deleted ? { items: [], limit: 10, offset: 0 } : REPORT_LIST }),
+    },
+  });
+  try {
+    const { document } = harness;
+    openFirstReport(document);
+    await settle();
+    assert.equal(document.querySelector("#delete-report").hidden, false);
+
+    document.querySelector("#delete-report").click();
+    await settle();
+    assert.equal(document.querySelectorAll(".report-item").length, 0);
+    assert.equal(document.querySelector("#report-detail").hidden, true);
+    assert.equal(document.querySelector("#detail-placeholder").hidden, false);
+    assert.equal(document.querySelector("#delete-report").hidden, true);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("a failed report deletion is reported and the row stays", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      "DELETE /api/reports/1": {
+        status: 500,
+        __body: { error: { code: "internal_error", message: "服务暂时不可用，请稍后重试。" } },
+      },
+    },
+  });
+  try {
+    const { document } = harness;
+    document.querySelector(".report-action-delete").click();
+    await settle();
+    assert.equal(document.querySelector("#reports-error").hidden, false);
+    assert.equal(collectText(document.querySelector("#reports-error")), "删除日报失败：服务暂时不可用，请稍后重试。");
+    assert.equal(document.querySelectorAll(".report-item").length, 1);
   } finally {
     harness.restore();
   }
