@@ -217,9 +217,12 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
     assert digest.report_id == 1
     assert digest.tool_calls == 2
     assert digest.final_text == "日报正文"
-    assert digest.report_path == "2026-10-14/1-2026-10-14-新闻日报.md"
+    assert digest.title == "人工智能 日报"
+    assert digest.report_path == "2026-10-14/1-人工智能-日报.md"
+    stored_report = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert stored_report.startswith("# 人工智能 日报\n\n")
     assert len(digest.source_archive_paths) == 1
-    assert "https://example.com/news" in ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert "https://example.com/news" in stored_report
     archive = SourceArchiveStorage(tmp_path / "source_archive").read_source(digest.source_archive_paths[0])
     assert "# AI 新闻" in archive
     assert "原始 URL：<https://example.com/news>" in archive
@@ -227,6 +230,7 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
     assert "摘要" not in archive
     assert "抓取时间：2026-10-14T01:00:00Z" in archive
     report = repository.get_report(digest.report_id)
+    assert report.title == digest.title
     assert report.file_path == digest.report_path
     assert report.content_hash
     assert report.summary == "日报正文"
@@ -238,6 +242,71 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
     assert "人工智能" in task_context and "Agent" in task_context
     assert "2026-10-14" in task_context and "日报系统提示词" not in task_context
     assert "一次性日报任务系统提示词" in system_prompt
+
+
+def test_agent_heading_becomes_the_report_title(tmp_path):
+    agent_text = (
+        "I have enough verified evidence. Here is the daily report.\n\n"
+        "---\n\n"
+        "# Ave Mujica 新闻日报（2026-10-16 · Asia/Shanghai）\n\n"
+        "## 概览\n\n"
+        "剧场版今日在日本全国上映。\n"
+    )
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {
+                    "results": [
+                        {
+                            "title": "上映",
+                            "url": "https://example.com/film",
+                            "content": "摘要",
+                        }
+                    ]
+                },
+                "search-1",
+            ),
+            text=agent_text,
+        )
+    )
+    repository = _repository()
+    service = DigestService(runner, settings=_settings(tmp_path), repository=repository)
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["Ave Mujica"]), date(2026, 10, 16))
+    )
+
+    assert digest.title == "Ave Mujica 新闻日报（2026-10-16 · Asia/Shanghai）"
+    report = repository.get_report(digest.report_id)
+    assert report is not None
+    assert report.title == digest.title
+    assert "ave-mujica" in digest.report_path
+    stored = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert stored.count("# Ave Mujica 新闻日报（2026-10-16 · Asia/Shanghai）") == 1
+
+
+def test_report_title_is_cleaned_from_markdown(tmp_path):
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {"results": [{"title": "标题", "url": "https://example.com", "content": "摘要"}]},
+                "search-1",
+            ),
+            text="# **AI 周报**：[比亚迪](https://example.com/b) 与特斯拉\n\n正文",
+        )
+    )
+    service = DigestService(
+        runner, settings=_settings(tmp_path), repository=_repository()
+    )
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["比亚迪"]), date(2026, 10, 16))
+    )
+
+    assert digest.title == "AI 周报：比亚迪 与特斯拉"
+    assert digest.report_path == "2026-10-16/1-ai-周报-比亚迪-与特斯拉.md"
 
 
 def test_run_once_writes_all_files_before_indexing_sources(tmp_path):
@@ -439,14 +508,14 @@ def test_empty_preferences_and_unreliable_sources_fail_before_success(tmp_path):
 def test_existing_different_report_is_not_overwritten(tmp_path):
     settings = _settings(tmp_path)
     storage = ReportStorage(settings.report_root)
-    storage.save_report(1, date(2026, 10, 14), "2026-10-14 新闻日报", "different")
+    storage.save_report(1, date(2026, 10, 14), "AI 日报", "different")
     runner = FakeRunner(_result(_record("web_search", {"url": "https://example.com", "title": "标题", "content": "简要摘要"}, "1")))
     repository = _repository()
     service = DigestService(runner, settings=settings, repository=repository)
 
     with pytest.raises(DigestStorageError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
-    assert storage.read_report("2026-10-14/1-2026-10-14-新闻日报.md") == "different"
+    assert storage.read_report("2026-10-14/1-ai-日报.md") == "different"
     assert repository.get_report(1) is None
 
 
@@ -484,7 +553,7 @@ def test_archive_conflict_rolls_back_new_report_and_preserves_archive(tmp_path):
     with pytest.raises(DigestStorageError):
         asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
 
-    report_path = tmp_path / "reports" / "2026-10-14" / "1-2026-10-14-新闻日报.md"
+    report_path = tmp_path / "reports" / "2026-10-14" / "1-ai-日报.md"
     assert not report_path.exists()
     assert archive_storage.read_source(stored.relative_path).endswith("pre-existing archive")
     assert repository.get_report(1) is None

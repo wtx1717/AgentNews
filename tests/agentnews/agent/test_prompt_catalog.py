@@ -57,7 +57,10 @@ def test_prompts_define_tool_search_write_and_reliability_rules():
     assert "新文件可以创建" in digest
     assert "不得覆盖" in digest
     assert "真实来源 URL" in digest
-    assert "真实 URL" in get_prompt("digest_markdown")
+    markdown = get_prompt("digest_markdown")
+    assert "真实 URL" in markdown
+    assert "一级标题" in markdown
+    assert "空泛标题" in markdown
     assert "原始 URL" in archive
     assert "不得猜测、改写或伪造" in archive
 

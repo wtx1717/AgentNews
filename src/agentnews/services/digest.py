@@ -21,6 +21,9 @@ from ..repositories import (
 )
 
 
+MAX_REPORT_TITLE_LENGTH = 120
+
+
 class DigestError(RuntimeError):
     """Base class for one-off digest failures."""
 
@@ -76,6 +79,7 @@ class DigestResult:
     source_archive_paths: tuple[str, ...]
     tool_calls: int
     final_text: str
+    title: str = ""
 
     @property
     def answer(self) -> str:
@@ -151,7 +155,7 @@ class DigestService:
         if not sources:
             raise DigestNoSourcesError("没有可靠来源，无法生成日报")
 
-        title = f"{business_date.isoformat()} 新闻日报"
+        title = _extract_report_title(final_text) or _fallback_report_title(prefs)
         reservation = self.repository.reserve_report(business_date, title)
         report_id = reservation.id
         stored_report = None
@@ -159,7 +163,7 @@ class DigestService:
         archive_paths: list[str] = []
         indexed_sources: list[tuple[_SourceEvidence, str | None]] = []
         try:
-            report_content = _render_report(final_text, sources)
+            report_content = _render_report(title, final_text, sources)
             stored_report = self.report_storage.save_report(
                 report_id, business_date, title, report_content
             )
@@ -212,6 +216,7 @@ class DigestService:
             source_archive_paths=tuple(archive_paths),
             tool_calls=run.tool_calls,
             final_text=final_text,
+            title=title,
         )
 
 
@@ -291,11 +296,42 @@ def _normalise_fetched_at(value: str | None) -> str:
     return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _render_report(text: str, sources: Sequence[_SourceEvidence]) -> str:
-    lines = [text.rstrip(), "", "## 来源", ""]
+def _extract_report_title(text: str) -> str:
+    """Return the first level-one Markdown heading as the report title."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("# "):
+            continue
+        title = _clean_report_title(stripped[2:])
+        if title:
+            return title
+    return ""
+
+
+def _clean_report_title(value: str) -> str:
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", value)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = re.sub(r"[`*_~]+", "", cleaned)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = "".join(character for character in cleaned if character.isprintable())
+    cleaned = " ".join(cleaned.split())
+    cleaned = cleaned.strip(" #\t-")
+    return cleaned[:MAX_REPORT_TITLE_LENGTH].rstrip()
+
+
+def _fallback_report_title(preferences: DigestPreferences) -> str:
+    subjects = preferences.topics or preferences.keywords or ("新闻",)
+    return _clean_report_title(f"{subjects[0]} 日报")
+
+
+def _render_report(title: str, text: str, sources: Sequence[_SourceEvidence]) -> str:
+    body = text.rstrip()
+    if not _extract_report_title(body):
+        body = f"# {title}\n\n{body}"
+    lines = [body, "", "## 来源", ""]
     for source in sources:
-        title = source.title or "未知来源"
-        safe_title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        title_text = source.title or "未知来源"
+        safe_title = title_text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
         lines.append(f"- [{safe_title}](<{source.url}>)")
     return "\n".join(lines) + "\n"
 
