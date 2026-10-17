@@ -753,6 +753,75 @@ test("stored content is never injected as markup", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Keyboard: Enter sends, Shift+Enter and IME composition do not
+// ---------------------------------------------------------------------------
+// Keyboard: Enter sends, Shift+Enter and IME composition do not
+// ---------------------------------------------------------------------------
+
+test("Enter sends the message and Shift+Enter does not", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: { "POST /api/chat": { __body: { session_id: "s1", answer: "完成", tool_calls: 0 } } },
+  });
+  try {
+    const { document } = harness;
+    const input = document.querySelector("#chat-input");
+
+    input.value = "回车换行的内容";
+    input.press("Enter", { shiftKey: true });
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 0, "Shift+Enter must not send");
+    assert.equal(input.value, "回车换行的内容");
+
+    input.press("Enter");
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 1);
+    assert.equal(input.value, "");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("an input-method candidate never sends the message", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: { "POST /api/chat": { __body: { session_id: "s1", answer: "完成", tool_calls: 0 } } },
+  });
+  try {
+    const { document } = harness;
+    const input = document.querySelector("#chat-input");
+    input.value = "拼音候选";
+
+    input.press("Enter", { isComposing: true, keyCode: 0 });
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 0, "isComposing must block Enter");
+
+    input.press("Enter", { keyCode: 229 });
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 0, "keyCode 229 must block Enter");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("blank input is not sent by Enter", async () => {
+  const harness = await startApp({ storedSession: "s1" });
+  try {
+    const input = harness.document.querySelector("#chat-input");
+    input.value = "   ";
+    input.press("Enter");
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 0);
+  } finally {
+    harness.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// Report deletion
 // ---------------------------------------------------------------------------
 
 const SECOND_REPORT = {

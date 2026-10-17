@@ -160,6 +160,7 @@ textarea { line-height: 1.45; }
 .button-primary:hover { background: #184c39; }
 .chat-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 10px; color: var(--muted); font-size: 11px; }
 .chat-footer strong { color: var(--ink); }
+.chat-hint { color: #98a29d; }
 .error-message { margin: 9px 0; color: #a54135; font-size: 12px; line-height: 1.5; }
 
 /* ---------- Digest band ---------- */

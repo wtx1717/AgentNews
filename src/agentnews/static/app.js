@@ -443,7 +443,9 @@ function updateChatAvailability() {
   elements.chatInput.disabled = archived;
   sendButton.disabled = archived || Boolean(run) || state.sessionBusy;
   sendButton.title = run ? "当前会话正在处理，请等待本轮结束" : "发送消息";
-  elements.chatInput.placeholder = run ? "当前会话正在处理，可先输入内容…" : "输入消息…";
+  elements.chatInput.placeholder = run
+    ? "当前会话正在处理，可先输入内容…"
+    : "输入消息…（Enter 发送，Shift+Enter 换行）";
   elements.restoreCurrent.hidden = !archived;
   updateSessionControlUsability();
 }
@@ -706,6 +708,18 @@ async function deleteSession(session) {
   }
 }
 
+function chatKeydownSends(event) {
+  return event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
+}
+
+function handleChatKeydown(event) {
+  if (!chatKeydownSends(event)) return;
+  // Enter sends; Shift+Enter keeps inserting a newline. An input-method
+  // candidate window must never trigger a send.
+  event.preventDefault();
+  if (typeof elements.chatForm.requestSubmit === "function") elements.chatForm.requestSubmit();
+  else elements.chatForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+}
 async function sendChat(event) {
   event.preventDefault();
   const message = elements.chatInput.value.trim();
@@ -1065,6 +1079,7 @@ elements.restoreCurrent.addEventListener("click", async () => {
 });
 elements.preferencesForm.addEventListener("submit", savePreferences);
 elements.chatForm.addEventListener("submit", sendChat);
+elements.chatInput.addEventListener("keydown", handleChatKeydown);
 elements.bashApprove.addEventListener("click", () => submitBashApproval("approve"));
 elements.bashReject.addEventListener("click", () => submitBashApproval("reject"));
 elements.bashDialog.addEventListener("cancel", (event) => event.preventDefault());
