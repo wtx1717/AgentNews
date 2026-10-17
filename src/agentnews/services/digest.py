@@ -1,3 +1,8 @@
+"""新闻日报服务。
+
+驱动 Agent 检索并撰写日报，随后归档来源、落盘正文并写入索引。
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -75,6 +80,7 @@ class DigestPreferences:
     timezone: str = "Asia/Shanghai"
 
     def __post_init__(self) -> None:
+        """规范化输入并校验时区；frozen 数据类只能借助 object.__setattr__ 赋值。"""
         object.__setattr__(self, "topics", _normalise_preferences(self.topics, "topics"))
         object.__setattr__(self, "keywords", _normalise_preferences(self.keywords, "keywords"))
         if not isinstance(self.timezone, str) or not self.timezone.strip():
@@ -87,11 +93,14 @@ class DigestPreferences:
 
     @property
     def has_topics(self) -> bool:
+        """是否至少配置了一个主题或关键词。"""
         return bool(self.topics or self.keywords)
 
 
 @dataclass(frozen=True, slots=True)
 class DigestResult:
+    """一次日报运行的结果，包含落盘路径与工具调用次数。"""
+
     report_id: int
     report_path: str
     source_archive_paths: tuple[str, ...]
@@ -102,6 +111,7 @@ class DigestResult:
 
     @property
     def answer(self) -> str:
+        """兼容调用方按 answer 字段读取日报正文。"""
         return self.final_text
 
 
@@ -141,6 +151,7 @@ class DigestService:
         preferences: DigestPreferences | Mapping[str, Any] | Any,
         business_date: date,
     ) -> DigestResult:
+        """校验偏好与日期后，完整执行一次日报生成、归档和入库。"""
         prefs = _coerce_preferences(preferences)
         if not isinstance(business_date, date) or isinstance(business_date, datetime):
             raise DigestConfigurationError("业务日期必须是 date")
@@ -179,6 +190,7 @@ class DigestService:
 
         title = _extract_report_title(final_text) or _fallback_report_title(prefs)
         summary = _report_summary(final_text)
+        # 先占位拿到 report_id，文件与来源都挂在该 ID 下，避免并发写入互相覆盖。
         reservation = self.repository.reserve_report(business_date, title)
         report_id = reservation.id
         stored_report = None
@@ -224,6 +236,7 @@ class DigestService:
                 summary=summary,
                 content_hash=stored_report.content_hash,
             )
+        # 任意一步失败都要回滚已写文件并撤销占位记录，避免留下半成品。
         except ReportConflictError as error:
             _rollback_created_files(self, stored_report, stored_sources)
             _cancel_report(self.repository, report_id)
@@ -245,6 +258,7 @@ class DigestService:
 
 
 def _normalise_preferences(values: Sequence[str] | Any, field_name: str) -> tuple[str, ...]:
+    """去除首尾空白并按出现顺序去重，非法输入抛配置错误。"""
     if isinstance(values, str) or not isinstance(values, Sequence):
         raise DigestConfigurationError(f"{field_name} 必须是字符串列表")
     result = []
@@ -262,6 +276,7 @@ def _rollback_created_files(
     report: StoredReport | None,
     sources: Sequence[StoredSourceArchive],
 ) -> None:
+    """尽力删除本次已落盘的文件，单个删除失败不影响其余清理。"""
     for source in reversed(sources):
         try:
             service.source_archive_storage.discard_created_source(source)
@@ -275,6 +290,7 @@ def _rollback_created_files(
 
 
 def _coerce_preferences(value: DigestPreferences | Mapping[str, Any] | Any) -> DigestPreferences:
+    """兼容数据类、字典和带同名属性的对象三种输入形式。"""
     if isinstance(value, DigestPreferences):
         return value
     if isinstance(value, Mapping):
@@ -315,6 +331,7 @@ def _utc_now() -> str:
 
 
 def _normalise_fetched_at(value: str | None) -> str:
+    """统一为 UTC 的 ISO 时间；缺失或无法解析时用当前时间兜底。"""
     if not value:
         return _utc_now()
     try:
@@ -338,6 +355,7 @@ def _extract_report_title(text: str) -> str:
 
 
 def _lines_outside_fences(text: str) -> list[str]:
+    """跳过代码围栏内的行，避免把示例标题误当成日报标题。"""
     lines: list[str] = []
     in_fence = False
     for line in text.splitlines():
@@ -389,6 +407,7 @@ def _sanitize_agent_report(text: str) -> str:
 
 
 def _strip_agent_preamble(text: str) -> str:
+    """去掉模型写在首个一级标题之前的过程性叙述。"""
     lines = text.splitlines()
     in_fence = False
     for index, line in enumerate(lines):
@@ -405,8 +424,10 @@ def _strip_agent_preamble(text: str) -> str:
 
 
 def _strip_process_sections(text: str) -> str:
+    """删掉结尾处的工具证据、过程说明和重复来源列表等非正文小节。"""
     lines = text.splitlines()
     changed = True
+    # 每删掉一个尾部小节都可能露出新的过程小节，因此循环到结构稳定为止。
     while changed:
         changed = False
         while lines and not lines[-1].strip():
@@ -493,6 +514,7 @@ def _citation_position(url: str, text: str) -> int:
 
 
 def _url_variants(url: str) -> set[str]:
+    """生成去尾斜杠与百分号解码等变体，用于在正文中匹配引用。"""
     variants = set()
     for candidate in (url, url.rstrip("/"), unquote(url), unquote(url.rstrip("/"))):
         if candidate:
@@ -512,6 +534,7 @@ def _markdown_link_destination(url: str) -> str:
 
 
 def _render_report(title: str, text: str, sources: Sequence[_SourceEvidence]) -> str:
+    """拼装最终正文：缺少一级标题时补上，并统一追加参考来源列表。"""
     body = text.rstrip()
     if not _extract_report_title(body):
         body = f"# {title}\n\n{body}"
@@ -534,6 +557,7 @@ def _render_report(title: str, text: str, sources: Sequence[_SourceEvidence]) ->
 
 
 def _report_summary(text: str) -> str:
+    """优先取“今日要点”的前三条列表项，没有则退回首段正文。"""
     lines = text.splitlines()
     for index, line in enumerate(lines):
         if not _OVERVIEW_HEADING_RE.match(line.strip()):
@@ -568,6 +592,7 @@ def _report_summary(text: str) -> str:
 
 
 def _cancel_report(repository: RepositoryProtocol, report_id: int) -> None:
+    """撤销占位记录；清理失败也不应掩盖调用方正在抛出的原始错误。"""
     try:
         repository.cancel_report(report_id)
     except Exception:
@@ -575,6 +600,7 @@ def _cancel_report(repository: RepositoryProtocol, report_id: int) -> None:
 
 
 def _extract_sources(records: Sequence[ToolCallRecord]) -> list[_SourceEvidence]:
+    """从工具调用记录中提取来源，并按 URL 合并搜索摘要与抓取正文。"""
     by_url: dict[str, _SourceEvidence] = {}
     for record in records:
         tool_name = record.name.lower()
@@ -601,6 +627,7 @@ def _extract_sources(records: Sequence[ToolCallRecord]) -> list[_SourceEvidence]
             content = _body_text(mapping) if fetch_like else ""
             has_search_evidence = search_like and bool(snippet)
             has_fetched_evidence = fetch_like and bool(content)
+            # 搜索记录要有摘要、抓取记录要有正文，才算可用的来源证据。
             if not (has_search_evidence or has_fetched_evidence):
                 continue
             source = by_url.get(url)
@@ -637,6 +664,7 @@ def _is_fetch_tool(name: str) -> bool:
 
 
 def _iter_mappings(value: Any) -> list[Mapping[str, Any]]:
+    """递归展开结果中的字典；字符串形式的 JSON 会先尝试解析。"""
     result: list[Mapping[str, Any]] = []
     if isinstance(value, str):
         stripped = value.strip()
@@ -665,6 +693,7 @@ def _first_text(mapping: Mapping[str, Any], *names: str) -> str:
 
 
 def _body_text(mapping: Mapping[str, Any]) -> str:
+    """只接受纯文本正文，HTML、二进制或含 NUL 的内容一律丢弃。"""
     content_type = _first_text(mapping, "content_type", "contentType", "mime_type", "mimeType")
     content_type_lower = content_type.lower()
     if content_type_lower:
@@ -703,6 +732,7 @@ def _looks_like_html(value: str) -> bool:
 
 
 def _is_http_url(value: str) -> bool:
+    """只放行不含空白/控制字符的 http(s) 链接，防止把非法串写进日报。"""
     if any(character.isspace() or ord(character) < 32 for character in value) or "<" in value or ">" in value:
         return False
     try:

@@ -1,3 +1,8 @@
+"""日报邮件发送：SMTP 投递、幂等投递记录，以及 Markdown 转 HTML 渲染。
+
+所有外部内容在拼进邮件前都做转义与校验，防止邮件头或 HTML 注入。
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -130,6 +135,7 @@ _CONTENT_MAX_NODES = 4000
 
 @dataclass(frozen=True, slots=True)
 class EmailSendResult:
+    """发送结果：投递记录，以及是否命中了幂等重复。"""
     delivery: EmailDeliveryRecord
     duplicate: bool
 
@@ -139,14 +145,18 @@ class EmailServiceError(RuntimeError):
 
 
 class ReportNotFoundError(EmailServiceError):
+    """指定的日报不存在。"""
     pass
 
 
 class ReportContentUnavailableError(EmailServiceError):
+    """日报正文无法读取，因而没有发送。"""
     pass
 
 
 class _SMTPFailure(Exception):
+    """内部 SMTP 失败载体，带稳定错误码和是否可重试标记。"""
+
     def __init__(self, code: str, message: str, *, retryable: bool) -> None:
         super().__init__(message)
         self.code = code
@@ -188,6 +198,7 @@ class EmailService:
         max_smtp_attempts: int | None = None,
         retry_existing: bool = False,
     ) -> EmailSendResult:
+        """发送已保存的日报并返回投递结果；相同幂等键只会真正投递一次。"""
         if report_id is None:
             reports = self.repository.list_reports(limit=1)
             if not reports:
@@ -216,6 +227,7 @@ class EmailService:
             markdown=markdown,
         )
         key = idempotency_key or _delivery_key(report.id, recipient, resend)
+        # 明确重发时加随机后缀，才能绕开默认幂等键真正再发一封。
         if resend and idempotency_key is None:
             key = f"{key}:{uuid4()}"
 
@@ -227,9 +239,11 @@ class EmailService:
             key,
         )
         if not created:
+            # 已有投递记录时，已发送或不允许复用重试都按重复直接返回，不再发信。
             if delivery.status == "sent" or not retry_existing:
                 return EmailSendResult(delivery=delivery, duplicate=True)
 
+        # 收件人为空无法投递，先落失败记录，让前端能看到原因。
         if not recipient:
             delivery = self.repository.update_email_delivery(
                 delivery.id,
@@ -265,8 +279,10 @@ class EmailService:
         if max_smtp_attempts is None:
             max_smtp_attempts = MAX_SMTP_ATTEMPTS
         if isinstance(max_smtp_attempts, bool) or not isinstance(max_smtp_attempts, int) or not 1 <= max_smtp_attempts <= MAX_SMTP_ATTEMPTS:
+            # 次数在进重试循环前校验，避免非法值让循环直接不执行。
             raise ValueError("max_smtp_attempts must be between 1 and 3")
         prior_attempts = self.repository.list_email_delivery_attempts(delivery.id)
+        # 接着历史次数往下编号，保证审计记录里的尝试序号不重复。
         first_attempt = (prior_attempts[-1].attempt_number + 1) if prior_attempts else 1
         for attempt_number in range(first_attempt, first_attempt + max_smtp_attempts):
             try:
@@ -286,6 +302,7 @@ class EmailService:
                     failure.code,
                     failure.message,
                 )
+                # 只有可重试错误且还有剩余次数时才继续，否则落为失败终态。
                 should_retry = failure.retryable and attempt_number < first_attempt + max_smtp_attempts - 1
                 delivery = self.repository.update_email_delivery(
                     delivery.id,
@@ -320,6 +337,7 @@ class EmailService:
         message: EmailMessage,
         recipient: str,
     ) -> None:
+        """建立 SMTP 连接投递一封邮件，并把协议异常映射成统一错误码。"""
         client = None
         try:
             if self.settings.smtp_use_ssl:
@@ -366,6 +384,7 @@ class EmailService:
             ) from None
         finally:
             if client is not None:
+                # 收尾失败不能影响投递结果，退出异常时退回 close 并忽略异常。
                 try:
                     client.quit()
                 except Exception:
@@ -547,6 +566,7 @@ class _RenderedHtml:
         self.parts.append(value)
 
     def html(self) -> str:
+        # 节点数超限时整体降级为转义纯文本，避免邮件体积失控。
         if self.count > _CONTENT_MAX_NODES:
             return f"<pre style=\"{_INLINE_STYLES['code_block']}\">" + _escape_html("".join(self.parts)) + "</pre>"
         return "".join(self.parts)
@@ -601,10 +621,12 @@ def _alignment_style(alignment: str) -> str:
 
 
 def _safe_href(value: str) -> str | None:
+    """只放行 http/https 链接，其余返回 None 以便降级为纯文本标签。"""
     candidate = value.strip()
     if candidate.startswith("<") and candidate.endswith(">"):
         # CommonMark allows `[label](<url>)`; stored reports used that form.
         candidate = candidate[1:-1].strip()
+    # 拒绝空白与引号等字符，避免链接里夹带属性或换行造成注入。
     if not candidate or any(character in candidate for character in ("\n", "\r", " ", '"', "'", "<", ">")):
         return None
     try:
@@ -672,6 +694,7 @@ def _trim_url_tail(candidate: str) -> str:
 
 
 def _inline_html(text: str) -> str:
+    """渲染单行内联 Markdown，未识别的文本一律转义后再输出。"""
     output: list[str] = []
     remaining = text
     while remaining:
@@ -813,6 +836,7 @@ def _classify_response_error(code: int) -> _SMTPFailure:
 
 
 def _validate_email_address(value: str) -> None:
+    """校验邮箱格式，并拒绝含换行的地址以防邮件头注入。"""
     if (
         not isinstance(value, str)
         or len(value) > 254
@@ -838,6 +862,7 @@ def _email_subject(title: str, report_date: str) -> str:
 
 
 def _delivery_key(report_id: int, recipient: str, resend: bool) -> str:
+    """生成默认幂等键；明确重发时附加随机后缀以允许再次投递。"""
     normalized_recipient = recipient.strip().casefold()
     suffix = f"resend:{uuid4()}" if resend else "default"
     return f"report:{report_id}:recipient:{normalized_recipient}:{suffix}"

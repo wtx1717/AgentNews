@@ -39,6 +39,7 @@ class BashApprovalExpired(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class BashApproval:
+    """一次等待用户确认的 Bash 执行请求。"""
     id: str
     run_id: str
     session_id: str
@@ -55,6 +56,7 @@ class BashApproval:
         output_limit_bytes: int,
         interpreter: str | None = None,
     ) -> dict[str, Any]:
+        """转成前端展示所需的审批详情字典。"""
         return {
             "id": self.id,
             "run_id": self.run_id,
@@ -93,6 +95,7 @@ class BashAudit:
         duration_ms: int | None = None,
         error_code: str | None = None,
     ) -> None:
+        """记录一条脱敏审计事件，同时写入可选 sink 与日志。"""
         payload: dict[str, Any] = {
             "event": event,
             "run_id": run_id,
@@ -172,7 +175,9 @@ class BashService:
         session_id: str,
         approval_id: str,
     ) -> str:
+        """执行已批准的应用程序动作或 PowerShell 命令，并记录审计事件。"""
         started = time.perf_counter()
+        # 内置 agentnews 动作直接调用服务层，不经过 shell。
         builtin = _parse_builtin(command)
         if builtin is not None:
             try:
@@ -357,6 +362,7 @@ class BashService:
         removed: list[str] = []
         bytes_removed = 0
         for path in self.temp_root.rglob("*"):
+            # 跳过符号链接，避免误删链接指向的临时目录之外的文件。
             if not path.is_file() or path.is_symlink():
                 continue
             try:
@@ -411,6 +417,7 @@ class ChatRunManager:
         self._active_by_session: dict[str, str] = {}
 
     async def start(self, message: str, session_id: str | None = None) -> _RunRecord:
+        """登记并启动一次会话运行，返回可轮询状态的运行记录。"""
         if session_id is None:
             session_id = self.repository.create_session().id
         session = self.repository.get_session(session_id)
@@ -422,6 +429,7 @@ class ChatRunManager:
             from .chat import ChatSessionArchivedError
 
             raise ChatSessionArchivedError("会话已归档，请先恢复")
+        # 同一会话只允许一个运行，避免并发写入打乱消息顺序。
         if session_id in self._active_by_session:
             raise ChatRunBusyError("当前会话已有正在处理的消息")
 
@@ -459,9 +467,11 @@ class ChatRunManager:
                 record.error_code = _error_code(error)
         finally:
             self._active_by_session.pop(record.session_id, None)
+            # 唤醒等待中的请求方，避免其一直阻塞。
             record.changed.set()
 
     async def _request_approval(self, record: _RunRecord, command: str, explanation: str) -> str:
+        """挂起运行等待用户审核，超时未答复则判定为过期。"""
         now = datetime.now(UTC)
         approval = BashApproval(
             id=str(uuid4()),
@@ -473,6 +483,7 @@ class ChatRunManager:
             expires_at=now + timedelta(seconds=self.approval_timeout_seconds),
         )
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        # 用 Future 把 HTTP 侧的用户决定回传给正在等待的协程。
         record.approval = approval
         record.approval_future = future
         record.status = "pending_approval"
@@ -542,6 +553,7 @@ class ChatRunManager:
         return result
 
     async def decide(self, run_id: str, approval_id: str, decision: str) -> _RunRecord:
+        """提交用户对某次 Bash 审核的批准或拒绝。"""
         record = self._runs.get(run_id)
         if record is None:
             raise KeyError("run not found")
@@ -557,6 +569,7 @@ class ChatRunManager:
         return record
 
     def snapshot(self, run_id: str) -> dict[str, Any] | None:
+        """返回运行状态快照，供 HTTP/UI 轮询展示。"""
         record = self._runs.get(run_id)
         if record is None:
             return None
@@ -673,6 +686,7 @@ def _json(value: Any) -> str:
 
 
 def _redact(value: str) -> str:
+    # 抹掉命令行里的密钥类参数，审计日志不保留明文。
     return re.sub(
         r"(?i)((?:api[_-]?key|token|password|passwd|secret)\s*(?:=|:)\s*)([^\s;]+)",
         r"\1[REDACTED]",

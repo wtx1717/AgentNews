@@ -1,3 +1,8 @@
+"""抓取来源的归档存储。
+
+把来源正文写成带元信息头的 Markdown 文件，负责路径规范化、原子写入与内容冲突检测。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,6 +19,7 @@ from .report_storage import ReportConflictError
 
 @dataclass(frozen=True, slots=True)
 class StoredSourceArchive:
+    """已落盘来源归档的相对路径、内容哈希，以及本次是否新建。"""
     relative_path: str
     content_hash: str
     created: bool = field(default=False, compare=False)
@@ -41,6 +47,7 @@ class SourceArchiveStorage:
         published_at: str | None,
         body: str,
     ) -> StoredSourceArchive:
+        """保存来源归档 Markdown；内容一致的重复保存视为成功且不重复写入。"""
         if isinstance(report_id, bool) or not isinstance(report_id, int) or report_id < 1:
             raise ValueError("report_id must be a positive integer")
         if isinstance(source_index, bool) or not isinstance(source_index, int) or source_index < 1:
@@ -53,8 +60,10 @@ class SourceArchiveStorage:
         if published_at is not None and not isinstance(published_at, str):
             raise TypeError("published_at must be a string or None")
 
+        # 元数据压成单行并补充占位值，避免空标题或换行破坏 Markdown 头部结构。
         display_title = _one_line(title) or "未知来源"
         parsed_url = urlsplit(url)
+        # 只接受 HTTP(S) 且不含空白、控制字符和尖括号的 URL，防止污染 Markdown 结构。
         if (
             parsed_url.scheme not in {"http", "https"}
             or not parsed_url.hostname
@@ -83,6 +92,7 @@ class SourceArchiveStorage:
         target.parent.mkdir(parents=True, exist_ok=True)
         content_bytes = content.encode("utf-8")
         content_hash = hashlib.sha256(content_bytes).hexdigest()
+        # 同时判断 is_symlink，避免悬空软链绕过存在性检查。
         if target.exists() or target.is_symlink():
             self._check_existing(target, content_hash)
             return StoredSourceArchive(relative_path, content_hash)
@@ -96,8 +106,10 @@ class SourceArchiveStorage:
                 temporary_path = Path(temporary_file.name)
                 temporary_file.write(content_bytes)
                 temporary_file.flush()
+                # 先落盘再发布，避免崩溃后留下内容为空的正式文件。
                 os.fsync(temporary_file.fileno())
             try:
+                # 用硬链接原子发布：目标已存在会抛错，避免并发写互相覆盖。
                 os.link(temporary_path, target)
                 created = True
             except FileExistsError:
@@ -134,6 +146,7 @@ class SourceArchiveStorage:
         return True
 
     def read_source(self, relative_path: str | Path) -> str:
+        """读取根目录下指定相对路径的归档文本。"""
         target = self._resolve_path(relative_path)
         return target.read_bytes().decode("utf-8")
 
@@ -141,6 +154,7 @@ class SourceArchiveStorage:
         raw = os.fspath(relative_path)
         if not isinstance(raw, str):
             raise InvalidSourceArchivePathError("archive path must be text")
+        # 统一分隔符，并同时按 POSIX 与 Windows 规则解析，防止跨平台路径绕过校验。
         normalized = raw.replace("\\", "/")
         parts = normalized.split("/")
         posix = PurePosixPath(normalized)
@@ -154,6 +168,7 @@ class SourceArchiveStorage:
             parsed_date = date.fromisoformat(parts[0])
         except ValueError:
             raise InvalidSourceArchivePathError("archive path contains an invalid date") from None
+        # 要求日期与文件名均为规范写法，避免同一文件存在多种路径表示。
         if parsed_date.isoformat() != parts[0] or not parts[1].endswith(".md"):
             raise InvalidSourceArchivePathError("archive path is not canonical")
         target = self.root.joinpath(*parts)
@@ -161,6 +176,7 @@ class SourceArchiveStorage:
         return target
 
     def _ensure_contained(self, path: Path) -> None:
+        # 先 resolve 再比较，防止 .. 或符号链接把路径带出根目录。
         try:
             path.resolve().relative_to(self.root)
         except ValueError:
@@ -183,4 +199,5 @@ class SourceArchiveStorage:
 
 
 def _one_line(value: str) -> str:
+    """把多行文本压成单行，避免破坏 Markdown 头部结构。"""
     return " ".join(value.split())

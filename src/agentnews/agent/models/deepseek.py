@@ -61,8 +61,10 @@ class DeepSeekLoggingCallback(BaseCallbackHandler):
     """Log request metadata only; never inspect prompts or generated content."""
 
     def __init__(self, model_name: str) -> None:
+        """记录模型名，并初始化按 run_id 统计耗时的容器。"""
         self.model_name = model_name
         self._started_at: dict[UUID, float] = {}
+        # 回调可能跨线程触发，耗时字典需要加锁保护。
         self._lock = Lock()
 
     def on_chat_model_start(
@@ -73,6 +75,7 @@ class DeepSeekLoggingCallback(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        """记录一次调用的起始时间。"""
         with self._lock:
             self._started_at[run_id] = perf_counter()
 
@@ -83,6 +86,7 @@ class DeepSeekLoggingCallback(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        """调用成功时输出不含内容的耗时日志。"""
         logger.info(
             "DeepSeek invocation completed model=%s duration_ms=%d",
             self.model_name,
@@ -96,6 +100,7 @@ class DeepSeekLoggingCallback(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        """调用失败时记录脱敏后的错误类型与耗时。"""
         mapped_error = map_deepseek_error(error)
         logger.warning(
             "DeepSeek invocation failed model=%s duration_ms=%d error_type=%s",
@@ -106,6 +111,7 @@ class DeepSeekLoggingCallback(BaseCallbackHandler):
 
     def _elapsed_ms(self, run_id: UUID) -> int:
         with self._lock:
+            # 取出即删除，避免耗时记录随运行次数无限增长。
             started = self._started_at.pop(run_id, None)
         if started is None:
             return 0
@@ -131,4 +137,5 @@ def create_deepseek_model(settings: Settings | None = None) -> ChatOpenAI:
             "DeepSeek client initialization failed error_type=%s",
             type(mapped_error).__name__,
         )
+        # 只抛出脱敏异常，避免异常链泄露密钥等配置细节。
         raise mapped_error from None

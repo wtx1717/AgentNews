@@ -1,3 +1,8 @@
+"""日报删除服务。
+
+协调删除日报索引，并清理对应的日报文件和来源归档文件。
+"""
+
 from __future__ import annotations
 
 from ..repositories import (
@@ -27,14 +32,17 @@ class ReportService:
         self.source_archive_storage = source_archive_storage
 
     def delete_report(self, report_id: int) -> bool:
+        """删除日报索引及其关联文件；索引不存在时返回 False。"""
         report = self.repository.get_report(report_id)
         if report is None:
             return False
         sources = self.repository.get_report_sources(report_id)
+        # 先删索引再做文件清理，避免清理失败时索引仍指向已删除的文件。
         if not self.repository.delete_report(report_id):
             return False
 
         cleanup_errors: list[BaseException] = []
+        # 单个文件删除失败不影响其余清理，最后一次性上报首个错误。
         self._delete_report_file(report.file_path, cleanup_errors)
         for source in sources:
             if source.archive_file_path:

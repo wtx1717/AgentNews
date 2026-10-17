@@ -53,6 +53,7 @@ from .tavily_mcp import (
     TavilyMCPClient,
 )
 
+# __all__ 决定对外导出的公共接口，新增工具时需与上方导入同步维护。
 __all__ = [
     "BashExecutionResult",
     "BashExecutor",

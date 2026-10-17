@@ -1,3 +1,5 @@
+"""Tavily MCP 搜索适配器：发现搜索工具并把返回结果统一成内部结果结构。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agentnews.config import Settings, get_settings
 
+# 文本结果无固定结构，按编号条目或 Title 行切分成段，再逐字段取键值。
 _TEXT_RESULT_SPLIT = re.compile(r"(?im)(?=^\s*(?:\d+[.)]\s+|Title\s*:))")
 _TEXT_FIELD = re.compile(
     r"(?im)^\s*(?:\d+[.)]\s*)?(Title|URL|Content|Snippet|Raw Content|Published Date|Published At)\s*:\s*(.*)$"
@@ -48,6 +51,8 @@ class SearchToolSchemaError(SearchError):
 
 @dataclass(frozen=True, slots=True)
 class OnlineSearchResult:
+    """一条已标准化的在线搜索结果。"""
+
     title: str
     url: str
     snippet: str
@@ -67,6 +72,7 @@ class TavilyMCPClient:
         self._input_schema: dict[str, Any] | None = None
 
     async def __aenter__(self) -> TavilyMCPClient:
+        """建立连接，确认唯一的 Tavily 搜索工具并校验其 schema。"""
         try:
             url, api_key = self._settings.require_search()
         except ValueError as exc:
@@ -118,12 +124,14 @@ class TavilyMCPClient:
         self._input_schema = None
 
     async def search(self, query: str, limit: int = 5) -> list[OnlineSearchResult]:
+        """按查询词调用搜索工具，返回至多 limit 条标准化结果。"""
         if self._client is None:
             raise RuntimeError("TavilyMCPClient must be used within an async context manager")
         if self._tool_name is None or self._input_schema is None:
             raise RuntimeError("Tavily search tool was not discovered for this connection")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must not be empty")
+        # bool 是 int 子类需显式排除；Tavily 只接受 5–20 条结果。
         if isinstance(limit, bool) or not isinstance(limit, int) or not 5 <= limit <= 20:
             raise ValueError("limit must be an integer between 5 and 20")
         arguments = _build_search_arguments(self._input_schema, query.strip(), limit)
@@ -145,6 +153,7 @@ class TavilyMCPClient:
 
 
 async def _discover_search_tool(client: Client) -> tuple[str, dict[str, Any]]:
+    """分页收集全部工具，要求恰好有一个 Tavily 搜索工具。"""
     tools = []
     cursor = None
     seen_cursors: set[str] = set()
@@ -178,6 +187,7 @@ async def _discover_search_tool(client: Client) -> tuple[str, dict[str, Any]]:
 
 
 def _is_tavily_search_tool(tool: Any) -> bool:
+    """按名称/标题/描述中的 tavily 与 search 词元判定是否为搜索工具。"""
     metadata = " ".join(
         value
         for value in (
@@ -187,12 +197,14 @@ def _is_tavily_search_tool(tool: Any) -> bool:
         )
         if isinstance(value, str)
     )
+    # 先按 camelCase 拆词，避免 "tavilySearch" 这类写法被漏判。
     expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", metadata)
     tokens = set(re.findall(r"[a-z0-9]+", expanded.casefold()))
     return "tavily" in tokens and "search" in tokens
 
 
 def _validate_search_schema(schema: Mapping[str, Any]) -> None:
+    """提前校验 schema 能表达所需的查询参数，避免调用时才失败。"""
     if schema.get("type") not in (None, "object"):
         raise SearchToolSchemaError("Tavily 搜索工具 inputSchema 不是 object")
     properties = schema.get("properties")
@@ -246,6 +258,7 @@ def _validate_search_schema(schema: Mapping[str, Any]) -> None:
 def _build_search_arguments(
     schema: Mapping[str, Any], query: str, limit: int
 ) -> dict[str, Any]:
+    """按 schema 实际声明的字段名与约束，构造最小的搜索参数集。"""
     _validate_search_schema(schema)
     properties = schema.get("properties")
     assert isinstance(properties, Mapping)
@@ -280,6 +293,7 @@ def _select_schema_key(properties: Mapping[str, Any], choices: tuple[str, ...]) 
 
 
 def _has_type(field_schema: Mapping[str, Any], expected: str) -> bool:
+    """type 缺省视为宽松兼容，仅当声明的类型包含期望值时才判定通过。"""
     declared = field_schema.get("type")
     return declared is None or declared == expected or (
         isinstance(declared, list) and expected in declared
@@ -298,6 +312,7 @@ def _has_numeric_type(field_schema: Mapping[str, Any]) -> bool:
 
 
 def _schema_accepts(field_schema: Mapping[str, Any], value: Any) -> bool:
+    """本地轻量校验值是否满足 const/enum/范围/长度等约束，不发网络请求。"""
     if "const" in field_schema and field_schema["const"] != value:
         return False
     if "enum" in field_schema:
@@ -325,6 +340,7 @@ def _schema_accepts(field_schema: Mapping[str, Any], value: Any) -> bool:
 
 
 def _read_field(value: Any, *names: str) -> Any:
+    """按别名依次读取字段，兼容映射与对象属性两种返回形态。"""
     for name in names:
         if isinstance(value, Mapping) and name in value:
             return value[name]
@@ -335,6 +351,7 @@ def _read_field(value: Any, *names: str) -> Any:
 
 
 def _standardize_results(response: Any) -> list[OnlineSearchResult]:
+    """优先解析结构化载荷，缺失时回退解析文本内容块。"""
     structured = getattr(response, "structured_content", None)
     if structured is None:
         structured = getattr(response, "structuredContent", None)
@@ -371,6 +388,7 @@ def _records_from_payload(payload: Any) -> list[dict[str, Any]] | None:
 
 
 def _records_from_text(text: str) -> list[dict[str, str]]:
+    """从文本输出中提取记录：先试 JSON，失败再按分行字段解析。"""
     if not text.strip():
         return []
     try:
@@ -397,6 +415,7 @@ def _records_from_text(text: str) -> list[dict[str, str]]:
 
 
 def _normalize_record(record: dict[str, Any], searched_at: datetime) -> OnlineSearchResult | None:
+    """标准化单条记录；缺标题或 URL 非 http(s) 时丢弃，避免下游抓取非法地址。"""
     title = _as_text(record.get("title"))
     url = _as_text(record.get("url"))
     if not title or not url:

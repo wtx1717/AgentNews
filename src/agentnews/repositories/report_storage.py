@@ -1,3 +1,8 @@
+"""报告文件的落盘存储。
+
+按「日期/报告ID-slug.md」结构保存 Markdown 报告，并做路径校验、原子写入与内容冲突检测。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -19,6 +24,7 @@ class InvalidReportPathError(ValueError):
 
 @dataclass(frozen=True)
 class StoredReport:
+    """已落盘报告的相对路径、内容哈希，以及本次是否新建。"""
     relative_path: str
     content_hash: str
     created: bool = field(default=False, compare=False)
@@ -37,6 +43,7 @@ class ReportStorage:
         title: str,
         content: str,
     ) -> StoredReport:
+        """保存报告 Markdown；内容一致的重复保存视为成功且不重复写入。"""
         if isinstance(report_id, bool) or not isinstance(report_id, int) or report_id < 1:
             raise ValueError("report_id must be a positive integer")
         if not isinstance(report_date, date) or isinstance(report_date, datetime):
@@ -56,6 +63,7 @@ class ReportStorage:
         self._ensure_contained(target.parent)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_contained(target)
+        # 同时判断 is_symlink，避免悬空软链绕过存在性检查。
         if target.exists() or target.is_symlink():
             self._check_existing_report(target, content_hash)
             return StoredReport(relative_path, content_hash)
@@ -73,9 +81,11 @@ class ReportStorage:
                 temporary_path = Path(temporary_file.name)
                 temporary_file.write(content_bytes)
                 temporary_file.flush()
+                # 先落盘再发布，避免崩溃后留下内容为空的正式文件。
                 os.fsync(temporary_file.fileno())
 
             try:
+                # 用硬链接原子发布：目标已存在会抛错，避免并发写互相覆盖。
                 os.link(temporary_path, target)
                 created = True
             except FileExistsError:
@@ -111,18 +121,21 @@ class ReportStorage:
         return True
 
     def read_report(self, relative_path: str | Path) -> str:
+        """读取根目录下指定相对路径的报告文本。"""
         target = self._resolve_report_path(relative_path)
         self._ensure_contained(target)
         return target.read_bytes().decode("utf-8")
 
     @staticmethod
     def _slugify(title: str) -> str:
+        """把标题转成可安全用作文件名的 slug。"""
         normalized = unicodedata.normalize("NFC", title).lower()
         slug: list[str] = []
         pending_separator = False
 
         for character in normalized:
             category = unicodedata.category(character)
+            # 组合字符须紧跟主体字符，否则重音等标记会与词干分离。
             if category.startswith("M"):
                 if slug and not pending_separator and slug[-1] != "-":
                     slug.append(character)
@@ -144,6 +157,7 @@ class ReportStorage:
         if not isinstance(raw_path, str):
             raise InvalidReportPathError("report path must be text")
 
+        # 统一分隔符，并同时按 POSIX 与 Windows 规则解析，防止跨平台路径绕过校验。
         normalized = raw_path.replace("\\", "/")
         posix_path = PurePosixPath(normalized)
         windows_path = PureWindowsPath(normalized)
@@ -163,6 +177,7 @@ class ReportStorage:
             parsed_date = date.fromisoformat(date_part)
         except ValueError:
             raise InvalidReportPathError("report path contains an invalid date") from None
+        # 要求严格的 YYYY-MM-DD，拒绝 2024-1-1 之类非规范写法导致重复目录。
         if parsed_date.isoformat() != date_part:
             raise InvalidReportPathError("report path date must use YYYY-MM-DD format")
 
@@ -170,6 +185,7 @@ class ReportStorage:
             raise InvalidReportPathError("report filename is not canonical")
         filename_stem = filename[:-3]
         report_id, separator, slug = filename_stem.partition("-")
+        # 文件名须为「报告ID-slug」，且 ID 不允许前导零，保证路径唯一可解析。
         if (
             not separator
             or not report_id.isascii()
@@ -201,6 +217,7 @@ class ReportStorage:
         )
 
     def _ensure_contained(self, path: Path) -> None:
+        # 先 resolve 再比较，防止 .. 或符号链接把路径带出根目录。
         resolved = path.resolve()
         try:
             resolved.relative_to(self.root)

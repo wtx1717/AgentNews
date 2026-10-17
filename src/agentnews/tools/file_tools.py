@@ -37,6 +37,7 @@ class FileToolError(RuntimeError):
         super().__init__(message)
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {"code": self.code, "message": self.message, "path": self.path}
 
     as_dict = to_dict
@@ -59,13 +60,16 @@ class DirectoryEntry:
 
     @property
     def entry_type(self) -> str:
+        """兼容别名，等价于 kind。"""
         return self.kind
 
     @property
     def path(self) -> str:
+        """兼容别名，等价于 relative_path。"""
         return self.relative_path
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "name": self.name,
             "kind": self.kind,
@@ -86,9 +90,11 @@ class DirectoryListing:
 
     @property
     def count(self) -> int:
+        """直接子项的数量。"""
         return len(self.entries)
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "path": self.path,
             "entries": [entry.to_dict() for entry in self.entries],
@@ -108,6 +114,7 @@ class FileReadResult:
     size_bytes: int
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "path": self.path,
             "content": self.content,
@@ -129,17 +136,21 @@ class SearchMatch:
 
     @property
     def relative_path(self) -> str:
+        """兼容别名，等价于 path。"""
         return self.path
 
     @property
     def line(self) -> int:
+        """兼容别名，等价于 line_number。"""
         return self.line_number
 
     @property
     def match(self) -> str:
+        """兼容别名，等价于 snippet。"""
         return self.snippet
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "path": self.path,
             "line_number": self.line_number,
@@ -162,13 +173,16 @@ class SearchResult:
 
     @property
     def count(self) -> int:
+        """匹配总数。"""
         return len(self.matches)
 
     @property
     def results(self) -> tuple[SearchMatch, ...]:
+        """兼容别名，等价于 matches。"""
         return self.matches
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "keyword": self.keyword,
             "path": self.path,
@@ -192,13 +206,16 @@ class FileWriteResult:
 
     @property
     def bytes_written(self) -> int:
+        """兼容别名，等价于 size_bytes。"""
         return self.size_bytes
 
     @property
     def created(self) -> bool:
+        """是否为新建文件（即没有覆盖已有文件）。"""
         return not self.overwritten
 
     def to_dict(self) -> dict[str, Any]:
+        """返回便于序列化输出的字典。"""
         return {
             "path": self.path,
             "size_bytes": self.size_bytes,
@@ -211,6 +228,7 @@ class FileWriteResult:
     as_dict = to_dict
 
 
+# 串行化“先查存在再创建/替换”的过程，避免并发写入互相覆盖。
 _WRITE_LOCK = threading.Lock()
 DEFAULT_MAX_SEARCH_FILES = 1_000
 DEFAULT_MAX_SEARCH_DEPTH = 32
@@ -223,9 +241,11 @@ class LocalFileTools:
     """Expose safe directory listing and UTF-8 file reading operations."""
 
     def __init__(self, resolver: ManagedPathResolver | None = None) -> None:
+        """注入路径解析器；未提供时使用默认的受管根目录。"""
         self.resolver = resolver or ManagedPathResolver()
 
     def list_dir(self, path: str | os.PathLike[str]) -> DirectoryListing:
+        """列出受管目录下的直接子项，按名称排序。"""
         raw_path = _display_input(path)
         try:
             directory = self.resolver.resolve(
@@ -281,6 +301,7 @@ class LocalFileTools:
         )
 
     def read_file(self, path: str | os.PathLike[str]) -> FileReadResult:
+        """读取受管目录内一个大小受限的 UTF-8 文本文件。"""
         raw_path = _display_input(path)
         try:
             target = self.resolver.resolve(path, expected_type="file")
@@ -337,6 +358,7 @@ class LocalFileTools:
         files_scanned = 0
         files_skipped = 0
         pending = [(root_directory, 0)]
+        # 记录已访问的解析后目录，避免符号链接成环导致重复遍历。
         visited_directories: set[Path] = set()
         needle = keyword if case_sensitive else keyword.casefold()
 
@@ -467,6 +489,7 @@ class LocalFileTools:
                 expected_type="file",
                 allow_missing_leaf=True,
             )
+            # 解析会跟随符号链接，这里按字面路径额外拒绝链接叶子。
             if _lexical_candidate(self.resolver, path).is_symlink():
                 raise UnsafePathError("symbolic link targets cannot be written")
         except Exception as error:
@@ -614,6 +637,7 @@ def _pick_search_directory(
 
 
 def _find_keyword_column(line: str, keyword: str, case_sensitive: bool) -> int:
+    """返回关键词首次出现的位置，大小写不敏感时借助折叠串映射回原列号。"""
     if case_sensitive:
         return line.find(keyword)
 
@@ -644,6 +668,7 @@ def _make_snippet(line: str, column: int) -> str:
 
 
 def _lexical_candidate(resolver: ManagedPathResolver, path: str | os.PathLike[str]) -> Path:
+    """按字面路径拼出候选路径，不做符号链接解析，用于写入前的链接检查。"""
     raw_path = os.fspath(path)
     native_path = Path(raw_path.replace("\\", os.sep))
     if native_path.is_absolute():
@@ -652,6 +677,7 @@ def _lexical_candidate(resolver: ManagedPathResolver, path: str | os.PathLike[st
 
 
 def _exclusive_create(path: Path, content: bytes) -> None:
+    """先写临时文件再硬链接到目标，目标已存在时不会覆盖。"""
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -672,6 +698,7 @@ def _exclusive_create(path: Path, content: bytes) -> None:
 
 
 def _atomic_replace(path: Path, content: bytes) -> None:
+    """先写临时文件再原子替换目标，避免读到只写了一半的内容。"""
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

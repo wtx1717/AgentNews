@@ -1,3 +1,5 @@
+"""SQLite 连接建立、显式事务管理与数据库初始化工具。"""
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +27,7 @@ def connect_database(
     if str(path) != ":memory:":
         database_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 关闭驱动自动提交，由 transaction() 显式控制事务边界。
     connection = sqlite3.connect(
         str(path) if str(path) == ":memory:" else database_path,
         timeout=5.0,
@@ -32,7 +35,9 @@ def connect_database(
         check_same_thread=check_same_thread,
     )
     connection.row_factory = sqlite3.Row
+    # 外键约束按连接生效，不设置则默认关闭。
     connection.execute("PRAGMA foreign_keys = ON")
+    # 写锁争抢时最多等待 5 秒，避免立即抛 database is locked。
     connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
@@ -48,6 +53,7 @@ def transaction(
     if connection.in_transaction:
         raise sqlite3.OperationalError("a transaction is already active")
 
+    # IMMEDIATE 提前取写锁，避免事务中途升级锁失败。
     connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     try:
         yield connection

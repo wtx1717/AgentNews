@@ -56,6 +56,7 @@ class BashInput(BaseModel):
     @field_validator("command", "explanation")
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
+        """拒绝纯空白参数，并统一去除首尾空格。"""
         normalized = value.strip()
         if not normalized:
             raise ValueError("text must not be blank")
@@ -72,6 +73,7 @@ class PowerShellInterpreter:
 
     @property
     def display(self) -> str:
+        """人类可读的“名称 (路径)”展示形式。"""
         return f"{self.label} ({self.executable})"
 
 
@@ -92,6 +94,7 @@ class BashExecutionResult:
     interpreter: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为工具返回用的字典，未设置的字段不输出。"""
         result = {
             "ok": self.ok,
             "command": self.command,
@@ -137,6 +140,7 @@ class BashExecutor:
         output_limit_bytes: int = DEFAULT_BASH_OUTPUT_LIMIT_BYTES,
         process_factory: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
+        """初始化执行边界，并校验超时与输出上限。"""
         self.working_directory = Path(working_directory).resolve()
         self.executable = executable
         if timeout_seconds <= 0:
@@ -153,6 +157,7 @@ class BashExecutor:
         return resolve_powershell(self.executable)
 
     async def execute(self, command: str) -> BashExecutionResult:
+        """执行一条已获批命令，必要时切换到支持子进程的事件循环。"""
         if not isinstance(command, str) or not command.strip():
             raise ValueError("command must not be empty")
         try:
@@ -253,6 +258,7 @@ class BashExecutor:
             )
         except asyncio.TimeoutError:
             timed_out = True
+            # 超时后必须终止子进程，否则读取任务会一直等待管道关闭。
             try:
                 process.kill()
             except ProcessLookupError:
@@ -296,6 +302,7 @@ class _OutputCapture:
             chunk = await stream.read(64 * 1024)
             if not chunk:
                 return
+            # stdout 与 stderr 两个协程共享总配额，加锁避免并发写入超出上限。
             async with self._lock:
                 allowed = max(0, min(len(chunk), self.limit - self.total))
                 if allowed:

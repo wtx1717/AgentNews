@@ -1,3 +1,5 @@
+"""SQLite 仓储实现：用单连接加可重入锁承载全部业务数据的读写。"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -35,6 +37,7 @@ from .protocol import (
 _PLACEHOLDER_PREFIX = "__agentnews_placeholder__/"
 _PENDING_PLACEHOLDER_PREFIX = _PLACEHOLDER_PREFIX + "pending/"
 _CANCELLED_PLACEHOLDER_PREFIX = _PLACEHOLDER_PREFIX + "cancelled/"
+# 消息元数据会落库，凭据类字段一律禁止写入。
 _FORBIDDEN_METADATA_PARTS = (
     "api_key",
     "apikey",
@@ -58,21 +61,27 @@ class SQLiteRepository:
         *,
         connection: sqlite3.Connection | None = None,
     ) -> None:
+        """打开或复用连接，设置外键与超时后执行迁移。"""
         self.database_path = database_path
+        # 单条连接会被多个线程共用，用可重入锁串行化全部访问。
         self._lock = threading.RLock()
         self._owns_connection = connection is None
+        # 允许连接跨线程复用，线程安全由 _lock 保证。
         self._connection = (
             connection
             if connection is not None
             else connect_database(database_path, check_same_thread=False)
         )
         self._connection.row_factory = sqlite3.Row
+        # SQLite 默认不启用外键，需显式打开才能触发级联删除。
         self._connection.execute("PRAGMA foreign_keys = ON")
+        # 写锁被占用时最多等待 5 秒，避免立即抛 database is locked。
         self._connection.execute("PRAGMA busy_timeout = 5000")
         run_migrations(self._connection, MIGRATIONS)
         self._closed = False
 
     def close(self) -> None:
+        """关闭自建连接；外部注入的连接交由调用方关闭。"""
         with self._lock:
             if self._closed:
                 return
@@ -81,6 +90,7 @@ class SQLiteRepository:
                 self._connection.close()
 
     def get_preferences(self) -> UserPreferences:
+        """读取单行用户偏好，记录缺失时抛错。"""
         with self._lock:
             row = self._connection_or_raise().execute(
                 """
@@ -95,10 +105,12 @@ class SQLiteRepository:
             return _preferences_from_row(row)
 
     def save_preferences(self, preferences: UserPreferences) -> UserPreferences:
+        """校验并整体覆写用户偏好。"""
         normalized = _normalize_preferences(preferences)
         topics_json = _dump_json(list(normalized.topics))
         keywords_json = _dump_json(list(normalized.keywords))
         now = _utc_now_text()
+        # immediate=True 先取写锁，避免读事务升级为写锁时冲突。
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             cursor = self._connection.execute(
                 """
@@ -130,6 +142,7 @@ class SQLiteRepository:
         status: ScheduledDigestRunStatus = "pending",
         error_code: str | None = None,
     ) -> tuple[ScheduledDigestRun, bool]:
+        """按业务日期创建任务记录，同日已存在时直接返回既有记录。"""
         _require_date(business_date, "business_date")
         _validate_scheduled_status(status)
         now = _utc_now_text()
@@ -139,6 +152,7 @@ class SQLiteRepository:
                 (business_date.isoformat(),),
             ).fetchone()
             if existing is not None:
+                # 按业务日期幂等：重复调度同一天时直接复用原记录。
                 return _scheduled_run_from_row(existing), False
             cursor = self._connection.execute(
                 """
@@ -163,9 +177,11 @@ class SQLiteRepository:
         return _scheduled_run_from_row(row), True
 
     def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None:
+        """抢占待执行任务；已被抢占或重试超限时返回 None。"""
         _require_positive_id(run_id, "run_id")
         now = _utc_now_text()
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            # 条件更新保证同一任务只被一个执行者抢到，且最多尝试 3 次。
             cursor = self._connection.execute(
                 """
                 UPDATE scheduled_digest_runs
@@ -184,6 +200,7 @@ class SQLiteRepository:
         return _scheduled_run_from_row(row)
 
     def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None:
+        """按业务日期查询定时任务。"""
         _require_date(business_date, "business_date")
         with self._lock:
             row = self._connection_or_raise().execute(
@@ -193,6 +210,7 @@ class SQLiteRepository:
             return _scheduled_run_from_row(row) if row is not None else None
 
     def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]:
+        """按业务日期倒序列出最近的定时任务。"""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         with self._lock:
@@ -214,11 +232,13 @@ class SQLiteRepository:
         completed_at: datetime | None = None,
         error_code: str | None = None,
     ) -> ScheduledDigestRun:
+        """更新定时任务的状态、重试次数与关联记录。"""
         _require_positive_id(run_id, "run_id")
         _validate_scheduled_status(status)
         if attempt_count is not None and (isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or not 0 <= attempt_count <= 3):
             raise ValueError("attempt_count must be between 0 and 3")
         final_time = completed_at
+        # 进入终态但未显式给完成时间时补当前时间，避免完成时间为空。
         if final_time is None and status in {"succeeded", "failed", "skipped"}:
             final_time = _utc_now()
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
@@ -253,6 +273,7 @@ class SQLiteRepository:
         return _scheduled_run_from_row(row)
 
     def create_session(self, title: str | None = None) -> ChatSession:
+        """新建活跃会话，标题为空表示稍后按首条用户消息生成。"""
         if title is not None and not isinstance(title, str):
             raise TypeError("title must be a string or None")
         normalized_title = title.strip() or None if title is not None else None
@@ -280,6 +301,7 @@ class SQLiteRepository:
         return session
 
     def get_session(self, session_id: str) -> ChatSession | None:
+        """按 ID 查询会话。"""
         with self._lock:
             row = self._connection_or_raise().execute(
                 "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
@@ -292,6 +314,7 @@ class SQLiteRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[ChatSession, ...]:
+        """分页列出指定状态的会话，按更新时间倒序。"""
         _validate_session_listing(status, limit, offset)
         with self._lock:
             rows = self._connection_or_raise().execute(
@@ -306,6 +329,7 @@ class SQLiteRepository:
             return tuple(_session_from_row(row) for row in rows)
 
     def rename_session(self, session_id: str, title: str) -> ChatSession:
+        """修改会话标题并刷新更新时间。"""
         normalized_title = _normalize_session_title(title)
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             row = self._connection.execute(
@@ -325,10 +349,12 @@ class SQLiteRepository:
             )
 
     def archive_session(self, session_id: str) -> bool:
+        """归档活跃会话，非活跃或不存在时返回 False。"""
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             row = self._connection.execute(
                 "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
             ).fetchone()
+            # 重复归档直接返回 False，避免覆盖原归档时间。
             if row is None or row["status"] != "active":
                 return False
             archived_at = _utc_now()
@@ -343,6 +369,7 @@ class SQLiteRepository:
             return True
 
     def restore_session(self, session_id: str) -> bool:
+        """恢复已归档会话，非归档状态返回 False。"""
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             row = self._connection.execute(
                 "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
@@ -361,6 +388,7 @@ class SQLiteRepository:
             return True
 
     def delete_session(self, session_id: str) -> bool:
+        """删除会话，消息记录依赖外键级联清理。"""
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             cursor = self._connection.execute(
                 "DELETE FROM chat_sessions WHERE id = ?", (session_id,)
@@ -374,6 +402,7 @@ class SQLiteRepository:
         content: str,
         metadata: Mapping[str, object] | None = None,
     ) -> ChatMessage:
+        """追加一条消息，并同步会话的更新时间。"""
         if not isinstance(role, str) or role not in {
             "system",
             "user",
@@ -409,6 +438,7 @@ class SQLiteRepository:
                 ),
             )
             title = session["title"]
+            # 空标题会话用首条用户消息生成默认标题。
             if role == "user" and title is None:
                 title = _title_from_user_message(content)
             self._connection.execute(
@@ -426,6 +456,7 @@ class SQLiteRepository:
         )
 
     def list_messages(self, session_id: str) -> tuple[ChatMessage, ...]:
+        """按写入顺序列出会话消息。"""
         with self._lock:
             connection = self._connection_or_raise()
             if connection.execute(
@@ -444,6 +475,7 @@ class SQLiteRepository:
             return tuple(_message_from_row(row) for row in rows)
 
     def reserve_report(self, report_date: date, title: str) -> ReportReservation:
+        """预占报告记录，先用占位路径占位，待生成完成后再落定。"""
         _require_date(report_date, "report_date")
         if not isinstance(title, str) or not title.strip():
             raise ValueError("title must not be empty")
@@ -467,6 +499,7 @@ class SQLiteRepository:
                 ),
             )
             report_id = int(cursor.lastrowid)
+            # 回填带 id 的占位值，便于区分 pending 与 cancelled 两种状态。
             self._connection.execute(
                 """
                 UPDATE reports
@@ -493,6 +526,7 @@ class SQLiteRepository:
         summary: str,
         content_hash: str,
     ) -> ReportRecord:
+        """把占位报告落定为最终文件路径、摘要与内容哈希。"""
         _require_positive_id(report_id, "report_id")
         _validate_report_fields(file_path, summary, content_hash)
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
@@ -500,6 +534,7 @@ class SQLiteRepository:
                 "SELECT * FROM reports WHERE id = ?",
                 (report_id,),
             ).fetchone()
+            # 只有仍处 pending 占位的记录才允许落定，防止重复写入。
             if row is None or not _is_pending_placeholder(row["file_path"]):
                 raise KeyError(f"unknown report reservation: {report_id}")
             updated_at = _utc_now()
@@ -524,6 +559,7 @@ class SQLiteRepository:
         return _report_from_row(result)
 
     def cancel_report(self, report_id: int) -> bool:
+        """取消未落定的报告预占，并清空其来源。"""
         _require_positive_id(report_id, "report_id")
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             row = self._connection.execute(
@@ -550,8 +586,10 @@ class SQLiteRepository:
             return True
 
     def delete_report(self, report_id: int) -> bool:
+        """删除已落定的报告，占位与已取消记录不可删除。"""
         _require_positive_id(report_id, "report_id")
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            # 占位路径是内部状态标记，不能经由删除接口清理。
             row = self._connection.execute(
                 """
                 SELECT 1 FROM reports
@@ -571,7 +609,9 @@ class SQLiteRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[ReportRecord, ...]:
+        """按日期区间分页列出已落定的报告。"""
         _validate_report_listing(start_date, end_date, limit, offset)
+        # 过滤内部占位路径，列表只暴露真正可用的报告。
         clauses = ["file_path NOT GLOB ?"]
         parameters: list[object] = [_PLACEHOLDER_PREFIX + "*"]
         if start_date is not None:
@@ -594,6 +634,7 @@ class SQLiteRepository:
             return tuple(_report_from_row(row) for row in rows)
 
     def get_report(self, report_id: int) -> ReportRecord | None:
+        """按 ID 查询已落定的报告。"""
         _require_positive_id(report_id, "report_id")
         with self._lock:
             row = self._connection_or_raise().execute(
@@ -615,6 +656,7 @@ class SQLiteRepository:
         snippet: str = "",
         archive_file_path: str | None = None,
     ) -> ReportSource:
+        """为报告追加来源，同一 URL 重复添加时返回已有记录。"""
         _require_positive_id(report_id, "report_id")
         if not all(isinstance(value, str) for value in (title, url, source_name, snippet)):
             raise TypeError("source title, URL, name, and snippet must be strings")
@@ -628,6 +670,7 @@ class SQLiteRepository:
             ).fetchone()
             if report is None or _is_cancelled_placeholder(report["file_path"]):
                 raise KeyError(f"unknown report: {report_id}")
+            # URL 去重：已收录的来源直接返回，避免重复插入。
             existing = self._connection.execute(
                 """
                 SELECT * FROM report_sources
@@ -669,6 +712,7 @@ class SQLiteRepository:
         )
 
     def get_report_sources(self, report_id: int) -> tuple[ReportSource, ...]:
+        """列出报告的全部来源，占位报告返回空元组。"""
         _require_positive_id(report_id, "report_id")
         with self._lock:
             connection = self._connection_or_raise()
@@ -691,6 +735,7 @@ class SQLiteRepository:
             return tuple(_source_from_row(row) for row in rows)
 
     def get_source(self, source_id: int) -> ReportSource | None:
+        """按 ID 查询来源，只返回已落定报告的来源。"""
         _require_positive_id(source_id, "source_id")
         with self._lock:
             row = self._connection_or_raise().execute(
@@ -712,6 +757,7 @@ class SQLiteRepository:
         trigger_source: EmailDeliverySource,
         idempotency_key: str,
     ) -> tuple[EmailDeliveryRecord, bool]:
+        """按幂等键预占邮件投递，返回 (记录, 是否新建)。"""
         _require_positive_id(report_id, "report_id")
         _validate_delivery_fields(recipient, subject, trigger_source, idempotency_key)
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
@@ -725,6 +771,7 @@ class SQLiteRepository:
                 "SELECT * FROM email_deliveries WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
+            # 幂等键命中时返回既有投递，避免重复发信。
             if existing is not None:
                 return _email_delivery_from_row(existing), False
             now = _utc_now_text()
@@ -744,6 +791,7 @@ class SQLiteRepository:
         return _email_delivery_from_row(row), True
 
     def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None:
+        """按 ID 查询邮件投递记录。"""
         _require_positive_id(delivery_id, "delivery_id")
         with self._lock:
             row = self._connection_or_raise().execute(
@@ -754,6 +802,7 @@ class SQLiteRepository:
     def list_email_deliveries(
         self, report_id: int
     ) -> tuple[EmailDeliveryRecord, ...]:
+        """按请求时间倒序列出某报告的全部投递记录。"""
         _require_positive_id(report_id, "report_id")
         with self._lock:
             rows = self._connection_or_raise().execute(
@@ -769,6 +818,7 @@ class SQLiteRepository:
     def list_email_delivery_attempts(
         self, delivery_id: int
     ) -> tuple[EmailDeliveryAttempt, ...]:
+        """按尝试序号列出某次投递的各次尝试。"""
         _require_positive_id(delivery_id, "delivery_id")
         with self._lock:
             rows = self._connection_or_raise().execute(
@@ -789,6 +839,7 @@ class SQLiteRepository:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> EmailDeliveryAttempt:
+        """记录一次投递尝试的结果。"""
         _require_positive_id(delivery_id, "delivery_id")
         _validate_delivery_attempt(attempt_number, status, error_code, error_message)
         attempted_at = _utc_now_text()
@@ -826,6 +877,7 @@ class SQLiteRepository:
         error_message: str | None = None,
         retry_count: int | None = None,
     ) -> EmailDeliveryRecord:
+        """更新投递状态、错误信息与重试次数。"""
         _require_positive_id(delivery_id, "delivery_id")
         if status not in {"pending", "sent", "failed"}:
             raise ValueError("invalid delivery status")
@@ -833,6 +885,7 @@ class SQLiteRepository:
             isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
         ):
             raise ValueError("retry_count must be a non-negative integer")
+        # 回到 pending 时清空完成时间，终态则落定当前时间。
         completed_at = None if status == "pending" else _utc_now_text()
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             cursor = self._connection.execute(
@@ -853,6 +906,7 @@ class SQLiteRepository:
         return _email_delivery_from_row(row)
 
     def _connection_or_raise(self) -> sqlite3.Connection:
+        """返回底层连接，仓储已关闭时抛错。"""
         if self._closed:
             raise RuntimeError("repository is closed")
         return self._connection
@@ -1024,6 +1078,7 @@ def _validate_delivery_attempt(
 
 
 def _encode_metadata(value: Mapping[str, object] | None) -> str | None:
+    """把元数据序列化为紧凑 JSON，值不兼容时抛错。"""
     if value is None:
         return None
     if not isinstance(value, Mapping):
@@ -1041,6 +1096,7 @@ def _encode_metadata(value: Mapping[str, object] | None) -> str | None:
 
 
 def _copy_metadata(value: Any, path: tuple[str, ...]) -> Any:
+    """递归复制元数据，拒绝凭据类键名与非 JSON 值。"""
     if isinstance(value, Mapping):
         result = {}
         for key, child in value.items():
@@ -1060,6 +1116,7 @@ def _copy_metadata(value: Any, path: tuple[str, ...]) -> Any:
 
 
 def _decode_metadata(value: str | None) -> Mapping[str, object] | None:
+    """反序列化元数据并冻结，库中内容非法时抛错。"""
     if value is None:
         return None
     try:
@@ -1072,6 +1129,7 @@ def _decode_metadata(value: str | None) -> Mapping[str, object] | None:
 
 
 def _freeze_json(value: Any) -> Any:
+    """把容器冻结为只读结构，避免调用方改到内部数据。"""
     if isinstance(value, dict):
         return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
     if isinstance(value, list):
@@ -1124,6 +1182,7 @@ def _normalize_session_title(title: str) -> str:
 
 
 def _title_from_user_message(content: str) -> str | None:
+    """用首条用户消息生成标题：压缩空白并截断到 80 字符。"""
     normalized = " ".join(content.split())
     return normalized[:80] or None
 
@@ -1212,6 +1271,7 @@ def _utc_now_text() -> str:
 
 
 def _parse_datetime(value: str) -> datetime:
+    """解析 ISO 时间；历史数据不带时区时按 UTC 处理。"""
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)

@@ -1,3 +1,5 @@
+"""数据库 schema 迁移：定义各版本迁移步骤并按其顺序执行。"""
+
 from collections.abc import Callable
 from dataclasses import dataclass
 import sqlite3
@@ -10,12 +12,15 @@ MigrationFunction = Callable[[sqlite3.Connection], None]
 
 @dataclass(frozen=True)
 class Migration:
+    """一条带版本号与名称的 schema 迁移。"""
+
     version: int
     name: str
     apply: MigrationFunction
 
 
 def _initial_schema(connection: sqlite3.Connection) -> None:
+    """创建初始表结构与索引。"""
     for statement in (
         """
         CREATE TABLE user_preferences (
@@ -119,6 +124,7 @@ def _initial_schema(connection: sqlite3.Connection) -> None:
 
 
 def _add_report_source_archive_path(connection: sqlite3.Connection) -> None:
+    """为 report_sources 增加归档文件路径列，已存在则跳过。"""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(report_sources)").fetchall()
@@ -130,6 +136,7 @@ def _add_report_source_archive_path(connection: sqlite3.Connection) -> None:
 
 
 def _add_chat_session_lifecycle(connection: sqlite3.Connection) -> None:
+    """为 chat_sessions 增加归档状态字段与索引，可重复执行。"""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(chat_sessions)").fetchall()
@@ -152,6 +159,7 @@ def _add_chat_session_lifecycle(connection: sqlite3.Connection) -> None:
 
 
 def _add_email_delivery_tracking(connection: sqlite3.Connection) -> None:
+    """补建邮件投递表并添加幂等键、触发来源等字段。"""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS email_deliveries (
@@ -221,6 +229,7 @@ def _add_email_delivery_tracking(connection: sqlite3.Connection) -> None:
 
 
 def _add_daily_digest_scheduler(connection: sqlite3.Connection) -> None:
+    """为每日定时摘要增加发送偏好字段与调度运行记录表。"""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(user_preferences)").fetchall()
@@ -345,6 +354,7 @@ def _fix_email_delivery_trigger_source(connection: sqlite3.Connection) -> None:
     )
 
 
+# 迁移按版本号顺序执行，只追加新条目，不改动已发布的历史。
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_initial_schema),
     Migration(
@@ -376,6 +386,7 @@ MIGRATIONS: tuple[Migration, ...] = (
 
 
 def _ensure_migrations_table(connection: sqlite3.Connection) -> None:
+    """确保迁移记录表 schema_migrations 存在。"""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -388,6 +399,7 @@ def _ensure_migrations_table(connection: sqlite3.Connection) -> None:
 
 
 def _validate_migrations(migrations: tuple[Migration, ...]) -> None:
+    """校验迁移版本号唯一、递增且从 1 开始连续。"""
     versions = [migration.version for migration in migrations]
     if versions != sorted(versions) or len(versions) != len(set(versions)):
         raise ValueError("migrations must have unique, ascending versions")
@@ -409,6 +421,7 @@ def run_migrations(
         "SELECT version, name FROM schema_migrations ORDER BY version"
     ).fetchall()
 
+    # 先核对已应用记录，库版本比代码新或名称不一致时拒绝继续写入。
     for applied in applied_migrations:
         known_name = known_migrations.get(applied["version"])
         if known_name is None:
@@ -422,6 +435,7 @@ def run_migrations(
 
     for migration in migrations:
         with transaction(connection, immediate=True):
+            # 事务内复查，避免并发进程重复应用同一迁移。
             already_applied = connection.execute(
                 "SELECT 1 FROM schema_migrations WHERE version = ?",
                 (migration.version,),

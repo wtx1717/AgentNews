@@ -1,3 +1,5 @@
+"""AgentNews 包入口：统一导出配置、仓储、服务与 API 的公开接口。"""
+
 from .config import Settings, get_settings
 from .db import initialize_database
 from .agent import AgentRunResult, AgentRunner, ToolCallRecord, create_agent_runner

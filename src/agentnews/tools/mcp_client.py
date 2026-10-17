@@ -1,3 +1,5 @@
+"""MCP 客户端：连接远端 MCP 服务，发现并校验工具，再受控地调用它们。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +19,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agentnews.config import Settings, get_settings
 
+# 工具名须满足模型 function-calling 的命名约束，否则无法直接暴露给模型。
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -78,9 +81,11 @@ class MCPClient:
 
     @property
     def tools(self) -> tuple[MCPToolDefinition, ...]:
+        """返回本次连接中已发现并通过校验的工具定义。"""
         return tuple(self._tools.values())
 
     async def __aenter__(self) -> MCPClient:
+        """建立连接、发现工具并预编译校验器，失败时清理已建资源。"""
         try:
             url, api_key = self._settings.require_search()
         except ValueError as exc:
@@ -98,6 +103,7 @@ class MCPClient:
             )
             transport = streamable_http_client(url, http_client=http_client)
             self._client = ProtocolClient(transport, read_timeout_seconds=timeout)
+            # 连接与工具发现共用一个总超时，避免半开连接无限阻塞。
             async with asyncio.timeout(timeout):
                 await stack.enter_async_context(self._client)
                 self._tools = await _discover_tools(self._client)
@@ -162,12 +168,14 @@ class MCPClient:
         except Exception:
             raise MCPUnavailableError("MCP 工具调用失败") from None
 
+        # 同时兼容 is_error / isError 两种拼写，显式错误标志一律按失败处理。
         if _read_field(response, "is_error", "isError") is True:
             raise MCPToolCallError("MCP 工具返回错误")
         return _json_result({"ok": True, "result": _serialize_value(response)})
 
 
 async def _discover_tools(client: Any) -> dict[str, MCPToolDefinition]:
+    """分页拉取全部工具定义；工具重名或游标循环直接判为发现失败。"""
     tools: dict[str, MCPToolDefinition] = {}
     cursor: str | None = None
     seen_cursors: set[str] = set()
@@ -191,6 +199,7 @@ async def _discover_tools(client: Any) -> dict[str, MCPToolDefinition]:
 
 
 def _normalize_tool(raw_tool: Any) -> MCPToolDefinition:
+    """把原始工具条目规范化，并校验其名称与 inputSchema 根类型。"""
     name = _read_field(raw_tool, "name")
     if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
         raise MCPToolDiscoveryError("MCP 工具名称无效或不兼容模型工具接口")
@@ -215,6 +224,7 @@ def _normalize_tool(raw_tool: Any) -> MCPToolDefinition:
 
 
 def _create_validator(schema: Mapping[str, Any]) -> Draft202012Validator:
+    """构造禁用远程 $ref 解析的 schema 校验器。"""
     # A server-provided schema must never trigger an arbitrary network fetch via $ref.
     from referencing import Registry
     from referencing.exceptions import NoSuchResource
@@ -229,6 +239,7 @@ def _create_validator(schema: Mapping[str, Any]) -> Draft202012Validator:
 
 
 def _read_field(value: Any, *names: str) -> Any:
+    """按别名依次读取字段，兼容映射与对象属性两种返回形态。"""
     for name in names:
         if isinstance(value, Mapping) and name in value:
             return value[name]
@@ -239,6 +250,7 @@ def _read_field(value: Any, *names: str) -> Any:
 
 
 def _serialize_value(value: Any) -> Any:
+    """递归把 MCP 返回对象转成可 JSON 序列化的纯数据结构。"""
     if hasattr(value, "model_dump"):
         return _serialize_value(value.model_dump(by_alias=True, exclude_none=True))
     if isinstance(value, Mapping):
@@ -253,6 +265,7 @@ def _serialize_value(value: Any) -> Any:
 
 
 def _json_result(value: Any) -> str:
+    """序列化为稳定且紧凑的 JSON 文本，便于模型消费。"""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
