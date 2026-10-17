@@ -7,7 +7,9 @@ LangChain Agent tool orchestration is included. The Agent discovers tools
 published by the configured MCP service and registers those tools alongside the
 four managed local file tools. It also has a project-owned
 `bash(command, explanation)` tool: every call pauses for local human approval
-before a PowerShell 7 process runs with the current Windows user's permissions.
+before a locally resolved PowerShell process runs with the current Windows
+user's permissions. PowerShell 7 (`pwsh`) is preferred and the built-in
+Windows PowerShell 5.1 is used when `pwsh` is not installed.
 The FastAPI backend exposes chat, settings, one-off digest, report, source,
 and health endpoints. It uses SQLite for business persistence by default;
 explicitly passing `InMemoryRepository` remains available for tests and local
@@ -17,6 +19,8 @@ integration scenarios.
 
 - Python 3.14 or later
 - [uv](https://docs.astral.sh/uv/)
+- PowerShell for the Bash tool: PowerShell 7 (`pwsh`, preferred) or the
+  built-in Windows PowerShell 5.1 (`powershell.exe`)
 
 ## Setup
 
@@ -112,15 +116,33 @@ uv run pytest
 The Agent may request `bash(command, explanation)` when the registered
 structured tools cannot complete an explicitly requested task. The browser
 shows the exact command, the model's short purpose statement, the working
-directory, inherited-environment policy, timeout, and output limit. A user
-must approve every call; a rejection is returned to the model as a tool result.
+directory, the resolved interpreter, inherited-environment policy, timeout,
+and output limit. A user must approve every call; a rejection is returned to
+the model as a tool result.
 
-Approved commands run through `pwsh -NoLogo -NoProfile -NonInteractive` in the
-project directory, with the current process environment and current Windows
+The interpreter is resolved when the command runs: `pwsh` is preferred and
+looked up on `PATH`, then in the usual PowerShell 7 install locations
+(`Program Files\PowerShell\7`, the per-user `Microsoft\PowerShell\7` folder,
+and the Microsoft Store alias). When no `pwsh` is installed the tool falls back
+to the built-in Windows PowerShell 5.1
+(`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`) and logs a
+warning. The approval dialog and the tool result both name the interpreter that
+will run or did run, so a fallback is visible. If neither interpreter can be
+found, the approved call returns `powershell_unavailable` with an actionable
+message instead of running, and a start failure returns
+`powershell_start_failed`.
+
+Approved commands run through `-NoLogo -NoProfile -NonInteractive -Command` in
+the project directory, with the current process environment and current Windows
 user permissions. The tool does not request administrator elevation. Commands
 can access files, environment variables, and the network, so this application is
 intended for one trusted user on the local machine and must not be exposed to
 the public internet.
+
+Captured output is decoded as UTF-8 first and falls back to the system code
+page, so Windows PowerShell 5.1 output in a non-UTF-8 console code page (for
+example cp936) is not garbled. Byte limits and timeouts apply to the raw
+captured bytes.
 
 The tool also recognizes these audited application actions:
 

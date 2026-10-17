@@ -608,6 +608,7 @@ test("an approval request blocks input, resumes the run and completes", async ()
     explanation: "读取一条测试输出",
     risk_summary: "仅执行只读命令",
     working_directory: "D:\\workspace",
+    interpreter: "Windows PowerShell 5.1 (C:\\windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE)",
     timeout_seconds: 60,
     output_limit_bytes: 1048576,
   };
@@ -641,6 +642,10 @@ test("an approval request blocks input, resumes the run and completes", async ()
     assert.equal(dialog.open, true);
     assert.equal(document.querySelector("#bash-approval-command").textContent, "Write-Output 'ok'");
     assert.equal(document.querySelector("#bash-approval-cwd").textContent, "D:\\workspace");
+    assert.equal(
+      document.querySelector("#bash-interpreter").textContent,
+      "Windows PowerShell 5.1 (C:\\windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE)",
+    );
     // The input stays typable; only sending is blocked for this conversation.
     assert.equal(document.querySelector("#chat-input").disabled, false);
     assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, true);

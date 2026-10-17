@@ -9,6 +9,13 @@ from agentnews.repositories import InMemoryRepository, ReportStorage, SourceArch
 from agentnews.services.bash import BashAudit, BashService, ChatRunManager
 from agentnews.services.chat import ChatResult
 from agentnews.services.report import ReportService
+from agentnews.tools.bash import BashExecutionResult
+
+
+INTERPRETER_LABEL = (
+    r"Windows PowerShell 5.1 "
+    r"(C:\windows\System32\WindowsPowerShell\v1.0\powershell.EXE)"
+)
 
 
 def _settings(tmp_path):
@@ -42,6 +49,11 @@ def _services(tmp_path, repository=None, *, audit=None):
                 "working_directory": tmp_path.resolve(),
                 "timeout_seconds": 60.0,
                 "output_limit_bytes": 1024,
+                "resolve_interpreter": lambda self: type(
+                    "Interpreter",
+                    (),
+                    {"display": INTERPRETER_LABEL},
+                )(),
                 "execute": lambda self, command: asyncio.sleep(
                     0, result=type(
                         "Result",
@@ -233,3 +245,69 @@ def test_run_manager_preserves_expired_error_state(tmp_path):
     assert snapshot["status"] == "expired"
     assert snapshot["error"]["code"] == "approval_expired"
     assert snapshot["error"]["message"] == "Bash 审核已过期。"
+
+
+def test_approval_snapshot_reports_the_interpreter(tmp_path):
+    repository, bash_service, _report_storage, _source_storage = _services(tmp_path)
+
+    class WaitingChatService:
+        async def run(self, message, session_id, *, bash_approval_handler, run_id):
+            await bash_approval_handler("Write-Output test", "执行一个测试命令")
+            return ChatResult(session_id, "已拒绝", 1)
+
+    manager = ChatRunManager(repository, WaitingChatService(), bash_service)
+
+    async def scenario():
+        record = await manager.start("请执行命令")
+        snapshot = manager.snapshot(record.id)
+        await manager.decide(record.id, record.approval.id, "reject")
+        await asyncio.wait_for(record.task, timeout=1)
+        return snapshot
+
+    snapshot = asyncio.run(scenario())
+
+    assert snapshot["approval"]["interpreter"] == INTERPRETER_LABEL
+
+
+def test_execute_returns_an_error_object_when_the_process_fails(tmp_path):
+    _repository, service, _report_storage, _source_storage = _services(tmp_path)
+
+    class FailingExecutor:
+        working_directory = tmp_path.resolve()
+        timeout_seconds = 60.0
+        output_limit_bytes = 1024
+
+        async def execute(self, command):
+            return BashExecutionResult(
+                ok=False,
+                command=command,
+                stdout="",
+                stderr="boom",
+                exit_code=1,
+                timed_out=False,
+                truncated=False,
+                duration_ms=5,
+                error_code="powershell_start_failed",
+                message="PowerShell 进程启动失败：PermissionError",
+            )
+
+    service.executor = FailingExecutor()
+
+    payload = json.loads(
+        asyncio.run(
+            service.execute(
+                "Get-Date",
+                "读取当前时间",
+                run_id="run-1",
+                session_id="session-1",
+                approval_id="approval-1",
+            )
+        )
+    )
+
+    assert payload["ok"] is False
+    assert payload["result"]["stderr"] == "boom"
+    assert payload["error"] == {
+        "code": "powershell_start_failed",
+        "message": "PowerShell 进程启动失败：PermissionError",
+    }

@@ -47,7 +47,14 @@ class BashApproval:
     created_at: datetime
     expires_at: datetime
 
-    def to_dict(self, *, working_directory: str, timeout_seconds: float, output_limit_bytes: int) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        working_directory: str,
+        timeout_seconds: float,
+        output_limit_bytes: int,
+        interpreter: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "id": self.id,
             "run_id": self.run_id,
@@ -57,6 +64,7 @@ class BashApproval:
             "expires_at": self.expires_at.isoformat(),
             "working_directory": working_directory,
             "environment": "继承当前 AgentNews 进程环境变量",
+            "interpreter": interpreter,
             "timeout_seconds": timeout_seconds,
             "output_limit_bytes": output_limit_bytes,
             "risk_summary": "批准后可在当前 Windows 用户权限下访问文件、环境变量和网络。",
@@ -142,6 +150,19 @@ class BashService:
     def output_limit_bytes(self) -> int:
         return self.executor.output_limit_bytes
 
+    @property
+    def interpreter_label(self) -> str | None:
+        """Describe the PowerShell entry point the executor would launch."""
+        resolver = getattr(self.executor, "resolve_interpreter", None)
+        if not callable(resolver):
+            return None
+        try:
+            interpreter = resolver()
+        except Exception:
+            return None
+        display = getattr(interpreter, "display", None)
+        return display if isinstance(display, str) and display else None
+
     async def execute(
         self,
         command: str,
@@ -201,6 +222,8 @@ class BashService:
             return payload
 
         process_result = await self.executor.execute(command)
+        payload = process_result.to_dict()
+        error_code = getattr(process_result, "error_code", None)
         self.audit.record(
             "execution_finished",
             run_id=run_id,
@@ -213,9 +236,20 @@ class BashService:
             timed_out=process_result.timed_out,
             truncated=process_result.truncated,
             duration_ms=process_result.duration_ms,
-            error_code=process_result.error_code,
+            error_code=error_code,
         )
-        return _json({"ok": process_result.ok, "result": process_result.to_dict()})
+        response: dict[str, Any] = {"ok": process_result.ok, "result": payload}
+        if not process_result.ok:
+            message = getattr(process_result, "message", None)
+            response["error"] = {
+                "code": error_code or "bash_failed",
+                "message": (
+                    message
+                    if isinstance(message, str) and message
+                    else "命令执行失败，请查看 stderr。"
+                ),
+            }
+        return _json(response)
 
     def _execute_builtin(self, command: tuple[str, tuple[str, ...]]) -> dict[str, Any]:
         action, args = command
@@ -536,6 +570,7 @@ class ChatRunManager:
                 working_directory=self.bash_service.working_directory,
                 timeout_seconds=self.bash_service.timeout_seconds,
                 output_limit_bytes=self.bash_service.output_limit_bytes,
+                interpreter=self.bash_service.interpreter_label,
             )
         if record.result is not None:
             payload["result"] = {

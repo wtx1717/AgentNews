@@ -45,6 +45,7 @@ const elements = {
   bashRisk: document.querySelector("#bash-approval-risk"),
   bashCommand: document.querySelector("#bash-approval-command"),
   bashCwd: document.querySelector("#bash-approval-cwd"),
+  bashInterpreter: document.querySelector("#bash-interpreter"),
   bashTimeout: document.querySelector("#bash-approval-timeout"),
   bashOutput: document.querySelector("#bash-approval-output"),
   bashError: document.querySelector("#bash-approval-error"),
@@ -111,6 +112,8 @@ function renderBashApproval(approval) {
   elements.bashRisk.textContent = approval?.risk_summary || "批准后命令将在当前用户权限下执行。";
   elements.bashCommand.textContent = approval?.command || "";
   elements.bashCwd.textContent = approval?.working_directory || "";
+  elements.bashInterpreter.textContent =
+    approval?.interpreter || "PowerShell（自动检测，未找到可用解释器）";
   elements.bashTimeout.textContent = `${approval?.timeout_seconds ?? 60} 秒`;
   elements.bashOutput.textContent = `${approval?.output_limit_bytes ?? 1048576} 字节`;
   setError(elements.bashError, "");
