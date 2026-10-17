@@ -14,31 +14,44 @@ class PromptNotFoundError(LookupError):
 
 @dataclass(frozen=True, slots=True)
 class _PromptScenario:
+    """单个场景的默认版本，以及版本号到资源文件的映射。"""
+
     default_version: str
     resources: Mapping[str, str]
 
 
+# 注册表用只读映射承载，避免运行时被意外修改。
 _PROMPTS: Mapping[str, _PromptScenario] = MappingProxyType(
     {
         "interaction": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "interaction/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "interaction/v1.md", "v2": "interaction/v2.md"}
+            ),
         ),
         "web_research": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "web_research/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "web_research/v1.md", "v2": "web_research/v2.md"}
+            ),
         ),
         "digest_system": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "digest_system/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "digest_system/v1.md", "v2": "digest_system/v2.md"}
+            ),
         ),
         "digest_markdown": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "digest_markdown/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "digest_markdown/v1.md", "v2": "digest_markdown/v2.md"}
+            ),
         ),
         "source_archive": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "source_archive/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "source_archive/v1.md", "v2": "source_archive/v2.md"}
+            ),
         ),
     }
 )
@@ -57,6 +70,7 @@ def get_prompt(scene: str, version: str | None = None) -> str:
             f"提示词场景 {scene!r} 未注册版本 {selected_version!r}"
         )
 
+    # 通过包资源读取提示词，保证安装后（含打包分发）仍能定位文件。
     resource_path = files(__package__).joinpath("prompts", *resource.split("/"))
     try:
         return resource_path.read_text(encoding="utf-8").strip()

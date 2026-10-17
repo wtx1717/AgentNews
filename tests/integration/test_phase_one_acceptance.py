@@ -198,7 +198,10 @@ def test_phase_one_digest_runs_search_fetch_and_persists_markdown(tmp_path):
     assert "时区：Asia/Shanghai" in context
     assert "关注主题：人工智能" in context
     assert "关键词：Agent、AgentNews" in context
-    assert initial_messages[2].content == "请根据本次任务上下文生成一次性新闻日报，并保留真实来源 URL。"
+    assert initial_messages[2].content == (
+        "请根据本次任务上下文检索并撰写一份新闻日报。只返回日报 Markdown 正文，"
+        "从一级标题开始，不要附加任何过程说明。"
+    )
 
     run = runner.last_result
     assert run is not None

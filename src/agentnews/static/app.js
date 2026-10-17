@@ -1,5 +1,8 @@
 "use strict";
 
+// AgentNews 前端主脚本：负责会话对话、日报浏览、来源查看、偏好设置与 Bash 审核交互。
+// 数据统一走 /api，渲染复用 markdown-render.js 的安全渲染器，不拼接 HTML。
+// 每个会话同时只允许一个运行，前端用 activeRuns + 拉取快照来跟踪运行状态。
 const CURRENT_SESSION_KEY = "agentnews.currentSessionId";
 const state = {
   sessionId: null,
@@ -45,6 +48,7 @@ const elements = {
   bashRisk: document.querySelector("#bash-approval-risk"),
   bashCommand: document.querySelector("#bash-approval-command"),
   bashCwd: document.querySelector("#bash-approval-cwd"),
+  bashInterpreter: document.querySelector("#bash-interpreter"),
   bashTimeout: document.querySelector("#bash-approval-timeout"),
   bashOutput: document.querySelector("#bash-approval-output"),
   bashError: document.querySelector("#bash-approval-error"),
@@ -87,6 +91,7 @@ const elements = {
   closeSettings: document.querySelector("#close-settings"),
 };
 
+// ---------- 通用状态与错误展示 ----------
 function setStatus(element, status, message) {
   const labels = {
     idle: "尚未执行",
@@ -105,12 +110,15 @@ function setError(element, message) {
   element.hidden = !message;
 }
 
+// ---------- Bash 执行审核弹窗 ----------
 function renderBashApproval(approval) {
   state.pendingApprovalId = approval?.id || null;
   elements.bashExplanation.textContent = approval?.explanation || "模型未提供执行说明。";
   elements.bashRisk.textContent = approval?.risk_summary || "批准后命令将在当前用户权限下执行。";
   elements.bashCommand.textContent = approval?.command || "";
   elements.bashCwd.textContent = approval?.working_directory || "";
+  elements.bashInterpreter.textContent =
+    approval?.interpreter || "PowerShell（自动检测，未找到可用解释器）";
   elements.bashTimeout.textContent = `${approval?.timeout_seconds ?? 60} 秒`;
   elements.bashOutput.textContent = `${approval?.output_limit_bytes ?? 1048576} 字节`;
   setError(elements.bashError, "");
@@ -126,6 +134,7 @@ function closeBashApproval() {
   setError(elements.bashError, "");
 }
 
+// ---------- 会话运行跟踪与轮询 ----------
 function stopRunPolling() {
   if (state.runPoller !== null) {
     window.clearInterval(state.runPoller);
@@ -143,6 +152,7 @@ function syncRunPolling() {
   else startRunPolling();
 }
 
+// 按会话登记进行中的运行，用于锁定该会话输入并在列表中显示运行标记。
 function markSessionRun(sessionId, runId) {
   if (!sessionId) return;
   state.activeRuns.set(sessionId, { runId, status: "running", approval: null });
@@ -180,6 +190,7 @@ function updateSessionRunIndicators() {
   }
 }
 
+// ---------- 运行快照状态机 ----------
 function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {}) {
   const run = runForSession(sessionId);
   if (run) {
@@ -221,6 +232,7 @@ async function finishChatRun(sessionId, snapshot) {
   }
 }
 
+// 快照状态决定后续动作：运行中或待审核只刷新界面，进入终态才结束本轮并刷新会话列表。
 async function handleChatRunSnapshot(sessionId, snapshot) {
   if (snapshot.status === "running") {
     applySnapshotToSession(sessionId, snapshot);
@@ -235,6 +247,7 @@ async function handleChatRunSnapshot(sessionId, snapshot) {
   }
 }
 
+// 后端运行是异步的，这里定时拉取每个进行中会话的快照，直到它们进入终态。
 async function pollChatRuns() {
   if (state.activeRuns.size === 0) {
     stopRunPolling();
@@ -285,6 +298,8 @@ async function submitBashApproval(decision) {
   }
 }
 
+// ---------- 后端请求封装 ----------
+// 后端错误统一放在 payload.error 中，这里转成带 code/status 的 Error，便于调用方分支处理。
 async function request(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -306,6 +321,7 @@ async function request(path, options = {}) {
   return payload;
 }
 
+// ---------- 偏好表单 ----------
 function parseList(value) {
   return value.split(/[\n,，]+/).map((item) => item.trim()).filter(Boolean);
 }
@@ -339,6 +355,7 @@ function renderRecentScheduledRun(run) {
   elements.recentScheduledRun.textContent = details.join(" · ");
 }
 
+// ---------- 会话本地存储与展示工具 ----------
 function readStoredSession() {
   try {
     return window.localStorage.getItem(CURRENT_SESSION_KEY);
@@ -378,6 +395,8 @@ function iconNode(pathData) {
   return svg;
 }
 
+// ---------- Markdown 与原文渲染 ----------
+// 安全渲染器不可用时退化为纯文本，绝不把 Markdown 当 HTML 注入。
 function renderMarkdown(container, text) {
   if (!container) return;
   if (markdown) markdown.renderMarkdownInto(container, text);
@@ -406,6 +425,7 @@ function renderSourceMarkdown() {
   elements.toggleSourceMarkdown.textContent = state.sourceRaw ? "查看排版" : "查看原文";
 }
 
+// ---------- 对话区渲染与可用性 ----------
 function appendMessage(role, text) {
   const empty = elements.chatMessages.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -414,9 +434,16 @@ function appendMessage(role, text) {
   const label = document.createElement("p");
   label.className = "message-role";
   label.textContent = { user: "你", assistant: "助手", system: "系统", tool: "工具" }[role] || role;
-  const body = document.createElement("p");
+  const body = document.createElement("div");
   body.className = "message-body";
-  body.textContent = text;
+  // Assistant replies are Markdown and get the shared safe renderer. Everything
+  // the user typed stays literal so their input is never reinterpreted.
+  if (role === "assistant" && text && markdown) {
+    body.className = "message-body markdown-body";
+    renderMarkdown(body, text);
+  } else {
+    body.textContent = text;
+  }
   article.append(label, body);
   elements.chatMessages.append(article);
 }
@@ -468,6 +495,7 @@ function setSessionBusy(busy) {
   updateChatAvailability();
 }
 
+// ---------- 当前会话切换与列表操作 ----------
 function clearCurrentSession() {
   state.sessionId = null;
   state.sessionStatus = null;
@@ -708,6 +736,7 @@ async function deleteSession(session) {
   }
 }
 
+// ---------- 发送对话消息 ----------
 function chatKeydownSends(event) {
   return event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
 }
@@ -767,6 +796,8 @@ async function sendChat(event) {
   }
 }
 
+// ---------- 日报列表与详情 ----------
+// 链接来自抓取内容，只放行 http/https，防止 javascript: 等协议进入 DOM。
 function safeHttpUrl(value) {
   try {
     const url = new URL(value);
@@ -880,6 +911,7 @@ async function loadReports({ reset = false } = {}) {
   }
 }
 
+// ---------- 来源归档查看 ----------
 function renderSource(source) {
   const item = document.createElement("li");
   item.className = "source-entry";
@@ -912,6 +944,7 @@ function renderSource(source) {
 }
 
 async function loadReport(reportId) {
+  // 请求序号用于丢弃过期响应，避免快速切换日报时旧结果覆盖新选择。
   const requestId = ++state.reportRequest;
   elements.detailPlaceholder.textContent = "读取中…";
   elements.detailPlaceholder.hidden = false;
@@ -1007,6 +1040,7 @@ async function loadSource(sourceId) {
   }
 }
 
+// ---------- 偏好读写与一次性日报 ----------
 async function loadPreferences() {
   elements.preferencesStatus.textContent = "读取中…";
   try {
@@ -1069,6 +1103,7 @@ async function runDigest() {
   }
 }
 
+// ---------- 事件绑定与初始化 ----------
 elements.today.dateTime = new Date().toISOString();
 elements.today.textContent = new Intl.DateTimeFormat("zh-CN", { dateStyle: "full" }).format(new Date());
 elements.newSession.addEventListener("click", createSession);

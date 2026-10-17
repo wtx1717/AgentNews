@@ -1,3 +1,5 @@
+"""应用配置模块：从环境变量与项目 .env 读取并校验运行参数。"""
+
 from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -49,6 +51,7 @@ class Settings(BaseSettings):
     )
     @classmethod
     def empty_strings_are_unset(cls, value: object) -> object:
+        """把空白字符串视为未设置，其余字符串去除首尾空白。"""
         if isinstance(value, str) and not value.strip():
             return None
         return value.strip() if isinstance(value, str) else value
@@ -56,13 +59,16 @@ class Settings(BaseSettings):
     @field_validator("app_timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
+        """校验 APP_TIMEZONE 必须是合法的 IANA 时区名。"""
         try:
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError):
+            # 屏蔽底层异常链，统一抛出配置校验错误。
             raise ValueError("APP_TIMEZONE must be a valid IANA timezone") from None
         return value
 
     def require_deepseek(self) -> tuple[SecretStr, str]:
+        """返回 DeepSeek 密钥与模型名，任一项缺失即报错。"""
         missing = []
         if self.deepseek_api_key is None:
             missing.append("DEEPSEEK_API_KEY")
@@ -73,6 +79,7 @@ class Settings(BaseSettings):
         return self.deepseek_api_key, self.deepseek_model
 
     def require_search(self) -> tuple[str, SecretStr]:
+        """返回搜索服务地址与密钥，任一项缺失即报错。"""
         self._raise_if_missing(
             "MCP search",
             [
@@ -88,6 +95,7 @@ class Settings(BaseSettings):
         return str(self.mcp_search_server_url), self.mcp_search_api_key
 
     def require_smtp(self) -> tuple[str, int, str, SecretStr, str]:
+        """返回 SMTP 发信参数，任一项缺失即报错。"""
         fields = (
             ("SMTP_HOST", self.smtp_host),
             ("SMTP_USER", self.smtp_user),
@@ -114,6 +122,7 @@ class Settings(BaseSettings):
             raise ValueError(f"{service} configuration is incomplete; set: {names}")
 
 
+# 缓存单例，避免每次调用都重新读取并校验 .env。
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the cached application settings instance."""

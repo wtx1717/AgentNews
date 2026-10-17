@@ -31,6 +31,7 @@ from .email import (
 )
 from .scheduler import DailyDigestScheduler, Scheduler
 
+# 汇总各 service 的公开接口，方便调用方统一从包根导入。
 __all__ = [
     "DigestConfigurationError",
     "DigestError",

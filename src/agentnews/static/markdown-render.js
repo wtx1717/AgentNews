@@ -13,6 +13,7 @@
 (function () {
   "use strict";
 
+  // ---------- 解析上限与词法常量 ----------
   var DEFAULT_MAX_BYTES = 200 * 1024;
   var DEFAULT_MAX_NODES = 5000;
 
@@ -31,6 +32,8 @@
   var RE_TRAILING_BRACKET = /[)\]]$/;
   var RE_URL_BODY = /^https?:\/\/[^\s<>()\[\]"']+$/;
 
+  // ---------- 行内模式 ----------
+  // 顺序即优先级：先取 code，避免行内代码中的 * 或 ~~ 被误判为强调。
   var INLINE_PATTERNS = [
     { type: "code", re: /`([^`\n]+)`/ },
     { type: "image", re: /!\[([^\]]*)\]\(([^()\s]+)\)/ },
@@ -41,6 +44,7 @@
     { type: "autolink", re: /https?:\/\/[^\s<>()\[\]"'*_`]+/ },
   ];
 
+  // ---------- 行级辅助 ----------
   function isBlank(line) {
     return String(line).trim() === "";
   }
@@ -68,6 +72,8 @@
     return href ? { href: href, value: value } : null;
   }
 
+  // ---------- URL 校验 ----------
+  // 链接文本来自抓取的 Markdown，只放行 http/https，其余降级为纯文本。
   function safeHttpUrl(value) {
     var text = String(value || "").trim();
     if (!text) return null;
@@ -79,6 +85,7 @@
     }
   }
 
+  // ---------- 表格与围栏识别 ----------
   function tableCells(line) {
     var value = line.trim();
     if (value.startsWith("|")) value = value.slice(1);
@@ -149,6 +156,7 @@
     return false;
   }
 
+  // ---------- 块级收集器 ----------
   function collectQuote(lines, index) {
     var inner = [];
     var cursor = index;
@@ -209,6 +217,7 @@
     return { block: { type: "paragraph", text: collected }, next: cursor };
   }
 
+  // ---------- 块级解析 ----------
   function parseMarkdownBlocks(text) {
     var source = typeof text === "string" ? text : "";
     var lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -289,6 +298,7 @@
     return blocks;
   }
 
+  // ---------- 行内解析 ----------
   function parseInline(text) {
     var source = typeof text === "string" ? text : "";
     var nodes = [];
@@ -322,7 +332,15 @@
         } else if (pattern.type === "strike") {
           node = { type: "strike", children: parseInline(match[1]) };
         } else if (pattern.type === "link" || pattern.type === "image") {
-          var href = safeHttpUrl(match[2]);
+          var destination = match[2];
+          if (
+            destination.length > 1 &&
+            destination.charAt(0) === "<" &&
+            destination.charAt(destination.length - 1) === ">"
+          ) {
+            destination = destination.slice(1, -1);
+          }
+          var href = safeHttpUrl(destination);
           if (href) {
             node =
               pattern.type === "image"
@@ -356,6 +374,7 @@
     return nodes;
   }
 
+  // ---------- DOM 渲染 ----------
   function createElement(doc, tag, className, textContent) {
     var element = doc.createElement(tag);
     if (className) element.setAttribute("class", className);
@@ -533,6 +552,8 @@
     return parts.join("\n\n");
   }
 
+  // ---------- 纯文本回退 ----------
+  // 超长或节点预算耗尽的输入退化为单个 pre，避免渲染拖慢页面。
   function renderPlainInto(doc, container, text) {
     var pre = createElement(doc, "pre", "markdown-code");
     pre.appendChild(doc.createTextNode(text));

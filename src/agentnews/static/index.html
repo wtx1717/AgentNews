@@ -10,6 +10,7 @@
     <script src="/static/app.js" defer></script>
   </head>
   <body>
+    <!-- 顶栏：品牌、工作区标识与设置入口 -->
     <header class="topbar">
       <a class="brand" href="/" aria-label="AgentNews 首页">
         <span class="brand-mark" aria-hidden="true">A</span>
@@ -34,6 +35,7 @@
     </header>
 
     <main class="workspace">
+      <!-- 页面标题与当日日期 -->
       <section class="page-heading" aria-labelledby="page-title">
         <div>
           <p class="eyebrow">个人新闻简报</p>
@@ -43,6 +45,7 @@
       </section>
 
       <div class="workspace-layout">
+        <!-- 会话侧栏：新建入口、活动/归档切换与会话列表 -->
         <aside class="session-sidebar section-panel" aria-labelledby="session-heading">
           <div class="section-heading">
             <div>
@@ -62,6 +65,7 @@
           <p id="sessions-error" class="error-message" role="alert" hidden></p>
         </aside>
 
+        <!-- 对话区：消息流、运行状态与消息输入框 -->
         <section class="conversation section-panel" aria-labelledby="chat-heading">
           <div class="section-heading">
             <div>
@@ -92,6 +96,7 @@
         </section>
       </div>
 
+      <!-- 一次性日报条：按已保存偏好立即生成一次日报 -->
       <section class="digest-band" aria-labelledby="digest-heading">
         <div class="digest-copy">
           <p class="eyebrow">按需执行</p>
@@ -107,6 +112,7 @@
         <p id="digest-message" class="digest-message" aria-live="polite"></p>
       </section>
 
+      <!-- 历史日报列表与报告详情（邮件发送、正文、来源） -->
       <div class="reports-grid">
         <section class="report-history section-panel" aria-labelledby="history-heading">
           <div class="section-heading">
@@ -164,6 +170,7 @@
         </section>
       </div>
 
+      <!-- 来源查看：展示归档正文，可在排版与原文间切换 -->
       <section id="source-viewer" class="source-viewer section-panel" aria-labelledby="source-heading" hidden>
         <div class="section-heading">
           <div>
@@ -184,6 +191,7 @@
       </section>
     </main>
 
+    <!-- 设置弹窗：日报偏好、主题关键词与定时发送配置 -->
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="preferences-heading">
       <div class="settings-header">
         <div>
@@ -238,6 +246,7 @@
       </form>
     </dialog>
 
+    <!-- Bash 审核弹窗：展示待执行命令与风险信息，由用户批准或拒绝 -->
     <dialog id="bash-approval-dialog" class="bash-approval-dialog" aria-labelledby="bash-approval-title">
       <form method="dialog" class="bash-approval-card">
         <p class="eyebrow">人工审核</p>
@@ -250,6 +259,7 @@
         <pre id="bash-approval-command" class="bash-command"></pre>
         <dl class="bash-approval-meta">
           <div><dt>工作目录</dt><dd id="bash-approval-cwd"></dd></div>
+          <div><dt>解释器</dt><dd id="bash-interpreter"></dd></div>
           <div><dt>超时</dt><dd id="bash-approval-timeout"></dd></div>
           <div><dt>输出上限</dt><dd id="bash-approval-output"></dd></div>
         </dl>

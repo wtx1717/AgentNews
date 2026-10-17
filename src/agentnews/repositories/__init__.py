@@ -33,6 +33,7 @@ from .source_archive_storage import (
     StoredSourceArchive,
 )
 
+# 显式声明公开导出，新增再导出时需同步维护此列表。
 __all__ = [
     "ChatMessage",
     "ChatSession",

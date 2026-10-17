@@ -608,6 +608,7 @@ test("an approval request blocks input, resumes the run and completes", async ()
     explanation: "读取一条测试输出",
     risk_summary: "仅执行只读命令",
     working_directory: "D:\\workspace",
+    interpreter: "Windows PowerShell 5.1 (C:\\windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE)",
     timeout_seconds: 60,
     output_limit_bytes: 1048576,
   };
@@ -641,6 +642,10 @@ test("an approval request blocks input, resumes the run and completes", async ()
     assert.equal(dialog.open, true);
     assert.equal(document.querySelector("#bash-approval-command").textContent, "Write-Output 'ok'");
     assert.equal(document.querySelector("#bash-approval-cwd").textContent, "D:\\workspace");
+    assert.equal(
+      document.querySelector("#bash-interpreter").textContent,
+      "Windows PowerShell 5.1 (C:\\windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE)",
+    );
     // The input stays typable; only sending is blocked for this conversation.
     assert.equal(document.querySelector("#chat-input").disabled, false);
     assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, true);
@@ -737,6 +742,50 @@ test("session actions keep their API contract", async () => {
       true,
     );
     assert.equal(document.querySelector("#chat-session-label").textContent, "未命名会话");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("assistant replies render markdown while user input stays literal", async () => {
+  const userText = "看 **这个** 与 <img src=x>";
+  const answer = "**重点**：见 [来源](https://example.com/a)\n\n- 一\n- 二\n\n<script>alert(1)</script>";
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      "GET /api/sessions/s1": {
+        __body: {
+          ...SESSION,
+          messages: [
+            { role: "user", content: userText },
+            { role: "assistant", content: answer },
+          ],
+        },
+      },
+    },
+  });
+  try {
+    const { document } = harness;
+    const bodies = document.querySelectorAll(".message-body");
+    assert.equal(bodies.length, 2);
+
+    // The user's own text is never reinterpreted as Markdown.
+    assert.equal(collectText(bodies[0]), userText);
+    assert.deepEqual(tagNames(bodies[0]), []);
+
+    // The assistant reply becomes structure inside a compact markdown bubble.
+    const tags = tagNames(bodies[1]);
+    for (const tag of ["P", "STRONG", "A", "UL", "LI"]) {
+      assert.ok(tags.includes(tag), `expected a ${tag} element in the reply`);
+    }
+    const anchor = bodies[1].querySelector("a");
+    assert.ok(anchor);
+    assert.equal(anchor.getAttribute("href"), "https://example.com/a");
+    assert.equal(anchor.getAttribute("target"), "_blank");
+    assert.equal(anchor.getAttribute("rel"), "noopener noreferrer");
+    assert.equal(tags.includes("SCRIPT"), false);
+    assert.ok(collectText(bodies[1]).includes("<script>alert(1)</script>"));
+    assert.ok(stylesheet.includes(".message-body.markdown-body"));
   } finally {
     harness.restore();
   }

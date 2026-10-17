@@ -1,3 +1,5 @@
+"""普通对话服务：编排消息校验、历史渲染、Agent 调用与消息持久化。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -28,6 +30,7 @@ class ChatAgentError(ChatError):
 
 @dataclass(frozen=True, slots=True)
 class ChatResult:
+    """一轮对话的最终结果，包含回答文本与本次运行产出的日报 ID。"""
     session_id: str
     answer: str
     tool_calls: int
@@ -49,6 +52,8 @@ class ChatService:
         self._runner_factory = runner_factory or create_agent_runner
 
     def get_agent_runner(self) -> Any:
+        """返回 Agent runner，首次调用时才创建实例。"""
+        # 惰性创建，让不需要 Agent 的调用方免于初始化开销。
         if self._agent_runner is None:
             self._agent_runner = self._runner_factory()
         return self._agent_runner
@@ -63,6 +68,7 @@ class ChatService:
         email_handler: Callable[[int | None, bool], Any] | None = None,
         run_id: str | None = None,
     ) -> ChatResult:
+        """处理一轮对话：校验输入、载入历史、调用 Agent 并保存问答。"""
         if not isinstance(message, str) or not message.strip():
             raise ValueError("message must not be empty")
         normalized_message = message.strip()
@@ -90,6 +96,7 @@ class ChatService:
         try:
             runner = self.get_agent_runner()
             invoke_kwargs: dict[str, Any] = {"task_context": context or None}
+            # 只向签名兼容的 runner 传回调，避免旧实现收到未知关键字参数而报错。
             if bash_approval_handler is not None and _accepts_keyword(
                 runner.ainvoke, "bash_approval_handler"
             ):
@@ -109,6 +116,7 @@ class ChatService:
             if not answer:
                 raise ValueError("empty agent answer")
         except Exception as error:
+            # 失败也写入一条助手消息，保证用户输入在会话历史里不丢失。
             self.repository.append_message(
                 active_session_id,
                 "assistant",
@@ -143,6 +151,7 @@ def _render_history(messages: Sequence[ChatMessage]) -> str:
 
 
 def _accepts_keyword(function: Any, name: str) -> bool:
+    """判断可调用对象是否接受指定关键字参数，用于兼容不同版本的 runner。"""
     try:
         parameters = inspect.signature(function).parameters.values()
     except (TypeError, ValueError):

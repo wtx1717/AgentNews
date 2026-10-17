@@ -1,12 +1,17 @@
+"""新闻日报服务。
+
+驱动 Agent 检索并撰写日报，随后归档来源、落盘正文并写入索引。
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..agent import AgentRunResult, AgentRunner, ToolCallRecord, create_agent_runner, get_prompt
@@ -18,6 +23,27 @@ from ..repositories import (
     SourceArchiveStorage,
     StoredReport,
     StoredSourceArchive,
+)
+
+
+MAX_REPORT_TITLE_LENGTH = 120
+MAX_UNCITED_SOURCES = 12
+MAX_REPORT_SUMMARY_LENGTH = 300
+
+_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+")
+_BULLET_RE = re.compile(r"^ {0,3}[-*+]\s+(.*)$")
+_ORDERED_RE = re.compile(r"^ {0,3}\d{1,3}[.)]\s+")
+_SOURCE_LIST_HEADING_RE = re.compile(
+    r"^#{2,6}\s*(?:来源|参考来源|参考资料|资料来源|信息来源|引用来源|引用列表)\s*[:：]?\s*$"
+)
+_PROCESS_HEADING_RE = re.compile(
+    r"^#{2,6}\s*(?:工具证据|证据说明|检索说明|抓取说明|工具调用记录|过程说明|检索过程)\s*[:：]?\s*$"
+)
+_PROCESS_PARAGRAPH_RE = re.compile(
+    r"^\*\*(?:证据|工具证据|检索|抓取|过程|验证)[^*]{0,8}\*\*\s*[:：]"
+)
+_OVERVIEW_HEADING_RE = re.compile(
+    r"^#{2,6}\s*(?:今日要点|概览|摘要|要点速览|核心要点)\s*$"
 )
 
 
@@ -54,6 +80,7 @@ class DigestPreferences:
     timezone: str = "Asia/Shanghai"
 
     def __post_init__(self) -> None:
+        """规范化输入并校验时区；frozen 数据类只能借助 object.__setattr__ 赋值。"""
         object.__setattr__(self, "topics", _normalise_preferences(self.topics, "topics"))
         object.__setattr__(self, "keywords", _normalise_preferences(self.keywords, "keywords"))
         if not isinstance(self.timezone, str) or not self.timezone.strip():
@@ -66,19 +93,25 @@ class DigestPreferences:
 
     @property
     def has_topics(self) -> bool:
+        """是否至少配置了一个主题或关键词。"""
         return bool(self.topics or self.keywords)
 
 
 @dataclass(frozen=True, slots=True)
 class DigestResult:
+    """一次日报运行的结果，包含落盘路径与工具调用次数。"""
+
     report_id: int
     report_path: str
     source_archive_paths: tuple[str, ...]
     tool_calls: int
     final_text: str
+    title: str = ""
+    summary: str = ""
 
     @property
     def answer(self) -> str:
+        """兼容调用方按 answer 字段读取日报正文。"""
         return self.final_text
 
 
@@ -118,6 +151,7 @@ class DigestService:
         preferences: DigestPreferences | Mapping[str, Any] | Any,
         business_date: date,
     ) -> DigestResult:
+        """校验偏好与日期后，完整执行一次日报生成、归档和入库。"""
         prefs = _coerce_preferences(preferences)
         if not isinstance(business_date, date) or isinstance(business_date, datetime):
             raise DigestConfigurationError("业务日期必须是 date")
@@ -129,13 +163,13 @@ class DigestService:
             (
                 get_prompt("digest_system"),
                 get_prompt("web_research"),
-                get_prompt("digest_markdown"),
                 get_prompt("source_archive"),
-                "本次任务由日报服务负责保存日报与来源归档。请只返回日报 Markdown 和实际工具证据，不要调用任何文件写入工具。",
+                get_prompt("digest_markdown"),
             )
         )
         run = await self.agent_runner.ainvoke(
-            "请根据本次任务上下文生成一次性新闻日报，并保留真实来源 URL。",
+            "请根据本次任务上下文检索并撰写一份新闻日报。只返回日报 Markdown 正文，"
+            "从一级标题开始，不要附加任何过程说明。",
             system_prompt=system_prompt,
             task_context=task_context,
         )
@@ -143,15 +177,20 @@ class DigestService:
             raise DigestError("Agent runner 返回了无效结果")
         if run.stop_reason != "completed":
             raise DigestIncompleteRunError("Agent 工具调用达到上限，日报任务未完成")
-        final_text = run.text.strip()
+        if not run.text.strip():
+            raise DigestEmptyResponseError("Agent 未返回日报正文")
+        final_text = _sanitize_agent_report(run.text)
         if not final_text:
             raise DigestEmptyResponseError("Agent 未返回日报正文")
 
-        sources = _extract_sources(run.tool_call_records)
-        if not sources:
+        all_sources = _extract_sources(run.tool_call_records)
+        if not all_sources:
             raise DigestNoSourcesError("没有可靠来源，无法生成日报")
+        sources = _select_report_sources(all_sources, final_text)
 
-        title = f"{business_date.isoformat()} 新闻日报"
+        title = _extract_report_title(final_text) or _fallback_report_title(prefs)
+        summary = _report_summary(final_text)
+        # 先占位拿到 report_id，文件与来源都挂在该 ID 下，避免并发写入互相覆盖。
         reservation = self.repository.reserve_report(business_date, title)
         report_id = reservation.id
         stored_report = None
@@ -159,7 +198,7 @@ class DigestService:
         archive_paths: list[str] = []
         indexed_sources: list[tuple[_SourceEvidence, str | None]] = []
         try:
-            report_content = _render_report(final_text, sources)
+            report_content = _render_report(title, final_text, sources)
             stored_report = self.report_storage.save_report(
                 report_id, business_date, title, report_content
             )
@@ -194,9 +233,10 @@ class DigestService:
             self.repository.finalize_report(
                 report_id,
                 file_path=stored_report.relative_path,
-                summary=_report_summary(final_text),
+                summary=summary,
                 content_hash=stored_report.content_hash,
             )
+        # 任意一步失败都要回滚已写文件并撤销占位记录，避免留下半成品。
         except ReportConflictError as error:
             _rollback_created_files(self, stored_report, stored_sources)
             _cancel_report(self.repository, report_id)
@@ -212,10 +252,13 @@ class DigestService:
             source_archive_paths=tuple(archive_paths),
             tool_calls=run.tool_calls,
             final_text=final_text,
+            title=title,
+            summary=summary,
         )
 
 
 def _normalise_preferences(values: Sequence[str] | Any, field_name: str) -> tuple[str, ...]:
+    """去除首尾空白并按出现顺序去重，非法输入抛配置错误。"""
     if isinstance(values, str) or not isinstance(values, Sequence):
         raise DigestConfigurationError(f"{field_name} 必须是字符串列表")
     result = []
@@ -233,6 +276,7 @@ def _rollback_created_files(
     report: StoredReport | None,
     sources: Sequence[StoredSourceArchive],
 ) -> None:
+    """尽力删除本次已落盘的文件，单个删除失败不影响其余清理。"""
     for source in reversed(sources):
         try:
             service.source_archive_storage.discard_created_source(source)
@@ -246,6 +290,7 @@ def _rollback_created_files(
 
 
 def _coerce_preferences(value: DigestPreferences | Mapping[str, Any] | Any) -> DigestPreferences:
+    """兼容数据类、字典和带同名属性的对象三种输入形式。"""
     if isinstance(value, DigestPreferences):
         return value
     if isinstance(value, Mapping):
@@ -267,11 +312,17 @@ def _coerce_preferences(value: DigestPreferences | Mapping[str, Any] | Any) -> D
 def _render_task_context(preferences: DigestPreferences, business_date: date) -> str:
     topics = "、".join(preferences.topics) or "无"
     keywords = "、".join(preferences.keywords) or "无"
+    weekday = "星期" + "一二三四五六日"[business_date.weekday()]
+    window_start = business_date - timedelta(days=6)
+    priority_start = business_date - timedelta(days=2)
     return (
-        f"业务日期：{business_date.isoformat()}\n"
+        f"业务日期：{business_date.isoformat()}（{weekday}）\n"
         f"时区：{preferences.timezone}\n"
+        f"检索窗口：{window_start.isoformat()} 至 {business_date.isoformat()}"
+        f"（优先 {priority_start.isoformat()} 至 {business_date.isoformat()}）\n"
         f"关注主题：{topics}\n"
-        f"关键词：{keywords}"
+        f"关键词：{keywords}\n"
+        "报告语言：简体中文"
     )
 
 
@@ -280,6 +331,7 @@ def _utc_now() -> str:
 
 
 def _normalise_fetched_at(value: str | None) -> str:
+    """统一为 UTC 的 ISO 时间；缺失或无法解析时用当前时间兜底。"""
     if not value:
         return _utc_now()
     try:
@@ -291,21 +343,256 @@ def _normalise_fetched_at(value: str | None) -> str:
     return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _render_report(text: str, sources: Sequence[_SourceEvidence]) -> str:
-    lines = [text.rstrip(), "", "## 来源", ""]
+def _extract_report_title(text: str) -> str:
+    """Return the first level-one Markdown heading outside code fences."""
+    for line in _lines_outside_fences(text):
+        if not re.match(r"^ {0,3}#\s+", line):
+            continue
+        title = _clean_report_title(line.strip()[1:].strip())
+        if title:
+            return title
+    return ""
+
+
+def _lines_outside_fences(text: str) -> list[str]:
+    """跳过代码围栏内的行，避免把示例标题误当成日报标题。"""
+    lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(line)
+    return lines
+
+
+def _clean_report_title(value: str) -> str:
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", value)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = re.sub(r"[`*_~]+", "", cleaned)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = "".join(character for character in cleaned if character.isprintable())
+    cleaned = " ".join(cleaned.split())
+    cleaned = cleaned.strip(" #\t-")
+    return cleaned[:MAX_REPORT_TITLE_LENGTH].rstrip()
+
+
+def _fallback_report_title(preferences: DigestPreferences) -> str:
+    subjects = preferences.topics or preferences.keywords or ("新闻",)
+    return _clean_report_title(f"{subjects[0]} 日报")
+
+
+def _plain_inline(value: str) -> str:
+    """Strip inline Markdown so summaries stay readable as plain text."""
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", value)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = re.sub(r"[`*_~]+", "", cleaned)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _sanitize_agent_report(text: str) -> str:
+    """Remove model narration and duplicated meta sections from report body."""
+    if not isinstance(text, str):
+        return ""
+    value = text.strip()
+    if not value:
+        return ""
+    value = _strip_agent_preamble(value)
+    value = _strip_process_sections(value)
+    value = _normalise_markdown_whitespace(value)
+    return value.strip()
+
+
+def _strip_agent_preamble(text: str) -> str:
+    """去掉模型写在首个一级标题之前的过程性叙述。"""
+    lines = text.splitlines()
+    in_fence = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence or not re.match(r"^ {0,3}#\s+", line):
+            continue
+        if not stripped[1:].strip():
+            return text
+        return "\n".join(lines[index:]).strip() if index else text
+    return text
+
+
+def _strip_process_sections(text: str) -> str:
+    """删掉结尾处的工具证据、过程说明和重复来源列表等非正文小节。"""
+    lines = text.splitlines()
+    changed = True
+    # 每删掉一个尾部小节都可能露出新的过程小节，因此循环到结构稳定为止。
+    while changed:
+        changed = False
+        while lines and not lines[-1].strip():
+            lines = lines[:-1]
+        if not lines:
+            break
+        heading_index = _last_heading_index(lines)
+        if heading_index is not None:
+            heading = lines[heading_index].strip()
+            if _SOURCE_LIST_HEADING_RE.match(heading) and _is_link_list(
+                lines[heading_index + 1 :]
+            ):
+                lines = lines[:heading_index]
+                changed = True
+                continue
+            if _PROCESS_HEADING_RE.match(heading):
+                lines = lines[:heading_index]
+                changed = True
+                continue
+        if _PROCESS_PARAGRAPH_RE.match(lines[-1].strip()):
+            cut = len(lines) - 1
+            while cut > 0 and lines[cut - 1].strip():
+                cut -= 1
+            lines = lines[:cut]
+            changed = True
+    return "\n".join(lines).strip()
+
+
+def _last_heading_index(lines: Sequence[str]) -> int | None:
+    for index in range(len(lines) - 1, -1, -1):
+        if _HEADING_RE.match(lines[index]):
+            return index
+    return None
+
+
+def _is_link_list(lines: Sequence[str]) -> bool:
+    seen_item = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not (_BULLET_RE.match(line) or _ORDERED_RE.match(line)):
+            return False
+        seen_item = True
+    return seen_item
+
+
+def _normalise_markdown_whitespace(text: str) -> str:
+    lines = text.splitlines()
+    result: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() == "---":
+            previous_blank = not result or not result[-1].strip()
+            next_blank = index + 1 >= len(lines) or not lines[index + 1].strip()
+            if previous_blank and next_blank:
+                continue
+        result.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(result)).strip()
+
+
+def _select_report_sources(
+    sources: Sequence[_SourceEvidence], text: str
+) -> list[_SourceEvidence]:
+    """Keep cited sources first, then fall back to sources whose body was fetched."""
+    positioned: list[tuple[int, _SourceEvidence]] = []
     for source in sources:
-        title = source.title or "未知来源"
-        safe_title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-        lines.append(f"- [{safe_title}](<{source.url}>)")
+        position = _citation_position(source.url, text)
+        if position >= 0:
+            positioned.append((position, source))
+    if positioned:
+        positioned.sort(key=lambda item: item[0])
+        return [source for _, source in positioned]
+
+    fetched = [source for source in sources if source.body is not None]
+    if fetched:
+        return fetched[:MAX_UNCITED_SOURCES]
+    return list(sources[:MAX_UNCITED_SOURCES])
+
+
+def _citation_position(url: str, text: str) -> int:
+    positions = [text.find(variant) for variant in _url_variants(url) if variant]
+    found = [position for position in positions if position >= 0]
+    return min(found) if found else -1
+
+
+def _url_variants(url: str) -> set[str]:
+    """生成去尾斜杠与百分号解码等变体，用于在正文中匹配引用。"""
+    variants = set()
+    for candidate in (url, url.rstrip("/"), unquote(url), unquote(url.rstrip("/"))):
+        if candidate:
+            variants.add(candidate)
+            variants.add(candidate.replace("(", "%28").replace(")", "%29"))
+    return variants
+
+
+def _markdown_link_destination(url: str) -> str:
+    """Escape characters the narrow Markdown renderers would reject."""
+    return (
+        url.replace("(", "%28")
+        .replace(")", "%29")
+        .replace("<", "%3C")
+        .replace(">", "%3E")
+    )
+
+
+def _render_report(title: str, text: str, sources: Sequence[_SourceEvidence]) -> str:
+    """拼装最终正文：缺少一级标题时补上，并统一追加参考来源列表。"""
+    body = text.rstrip()
+    if not _extract_report_title(body):
+        body = f"# {title}\n\n{body}"
+    lines = [body, "", "## 参考来源", ""]
+    for source in sources:
+        title_text = source.title or "未知来源"
+        safe_title = title_text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        destination = _markdown_link_destination(source.url)
+        meta = "，".join(
+            part
+            for part in (
+                (source.source_site or "").strip(),
+                (source.published_at or "").strip(),
+            )
+            if part
+        )
+        suffix = f"（{meta}）" if meta else ""
+        lines.append(f"- [{safe_title}]({destination}){suffix}")
     return "\n".join(lines) + "\n"
 
 
 def _report_summary(text: str) -> str:
-    paragraphs = [" ".join(part.split()) for part in text.split("\n\n") if part.strip()]
-    return paragraphs[0][:300] if paragraphs else ""
+    """优先取“今日要点”的前三条列表项，没有则退回首段正文。"""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not _OVERVIEW_HEADING_RE.match(line.strip()):
+            continue
+        bullets: list[str] = []
+        for child in lines[index + 1 :]:
+            if _HEADING_RE.match(child):
+                break
+            match = _BULLET_RE.match(child)
+            if match:
+                cleaned = _plain_inline(match.group(1))
+                if cleaned:
+                    bullets.append(cleaned)
+        if bullets:
+            return "；".join(bullets[:3])[:MAX_REPORT_SUMMARY_LENGTH]
+        break
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or _HEADING_RE.match(line):
+            continue
+        if stripped.startswith((">", "|", "```", "~~~")):
+            continue
+        if _BULLET_RE.match(line) or _ORDERED_RE.match(line):
+            continue
+        if _PROCESS_PARAGRAPH_RE.match(stripped):
+            continue
+        cleaned = _plain_inline(stripped)
+        if cleaned:
+            return cleaned[:MAX_REPORT_SUMMARY_LENGTH]
+    return ""
 
 
 def _cancel_report(repository: RepositoryProtocol, report_id: int) -> None:
+    """撤销占位记录；清理失败也不应掩盖调用方正在抛出的原始错误。"""
     try:
         repository.cancel_report(report_id)
     except Exception:
@@ -313,6 +600,7 @@ def _cancel_report(repository: RepositoryProtocol, report_id: int) -> None:
 
 
 def _extract_sources(records: Sequence[ToolCallRecord]) -> list[_SourceEvidence]:
+    """从工具调用记录中提取来源，并按 URL 合并搜索摘要与抓取正文。"""
     by_url: dict[str, _SourceEvidence] = {}
     for record in records:
         tool_name = record.name.lower()
@@ -339,6 +627,7 @@ def _extract_sources(records: Sequence[ToolCallRecord]) -> list[_SourceEvidence]
             content = _body_text(mapping) if fetch_like else ""
             has_search_evidence = search_like and bool(snippet)
             has_fetched_evidence = fetch_like and bool(content)
+            # 搜索记录要有摘要、抓取记录要有正文，才算可用的来源证据。
             if not (has_search_evidence or has_fetched_evidence):
                 continue
             source = by_url.get(url)
@@ -375,6 +664,7 @@ def _is_fetch_tool(name: str) -> bool:
 
 
 def _iter_mappings(value: Any) -> list[Mapping[str, Any]]:
+    """递归展开结果中的字典；字符串形式的 JSON 会先尝试解析。"""
     result: list[Mapping[str, Any]] = []
     if isinstance(value, str):
         stripped = value.strip()
@@ -403,6 +693,7 @@ def _first_text(mapping: Mapping[str, Any], *names: str) -> str:
 
 
 def _body_text(mapping: Mapping[str, Any]) -> str:
+    """只接受纯文本正文，HTML、二进制或含 NUL 的内容一律丢弃。"""
     content_type = _first_text(mapping, "content_type", "contentType", "mime_type", "mimeType")
     content_type_lower = content_type.lower()
     if content_type_lower:
@@ -441,6 +732,7 @@ def _looks_like_html(value: str) -> bool:
 
 
 def _is_http_url(value: str) -> bool:
+    """只放行不含空白/控制字符的 http(s) 链接，防止把非法串写进日报。"""
     if any(character.isspace() or ord(character) < 32 for character in value) or "<" in value or ">" in value:
         return False
     try:

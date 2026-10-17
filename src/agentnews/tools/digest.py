@@ -33,6 +33,7 @@ class GenerateDigestInput(BaseModel):
     @field_validator("topic", "keyword")
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
+        """拒绝纯空白参数，并统一去除首尾空格。"""
         normalized = value.strip()
         if not normalized:
             raise ValueError("text must not be blank")

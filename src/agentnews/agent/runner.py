@@ -80,6 +80,7 @@ class AgentRunner:
         search_client_factory: Callable[[Settings], Any] | None = None,
         bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
+        """初始化运行器，未显式传入模型时按配置创建 DeepSeek 模型。"""
         self.settings = settings or get_settings()
         self.model = model if model is not None else create_deepseek_model(self.settings)
         self.resolver = resolver
@@ -115,6 +116,7 @@ class AgentRunner:
         resolved_system_prompt = system_prompt or get_prompt("interaction")
         normalized_context = task_context.strip() if task_context else ""
 
+        # 用退出栈统一管理 MCP 与搜索客户端的异步资源释放。
         stack = AsyncExitStack()
         try:
             tools = create_local_file_tools(self.resolver)
@@ -159,10 +161,12 @@ class AgentRunner:
                         or input_schema.get("type") != "object"
                     ):
                         raise ToolRegistrationError("MCP 工具定义无效，无法注册")
+                    # 用默认参数在定义时绑定工具名，避免闭包共享循环变量。
                     async def invoke_mcp_tool(
                         _tool_name: str = tool_name,
                         **arguments: Any,
                     ) -> str:
+                        """把一次工具调用转发给 MCP 客户端。"""
                         return await mcp_client.call_tool(_tool_name, arguments)
 
                     try:
@@ -180,6 +184,7 @@ class AgentRunner:
                 search_client: Any | None = None
 
                 async def run_legacy_search(query: str, limit: int = 5) -> str:
+                    """首次调用时才创建旧版搜索客户端，并执行一次查询。"""
                     nonlocal search_client
                     if search_client is None:
                         search_client = self.search_client_factory(self.settings)
@@ -226,6 +231,7 @@ class AgentRunner:
                 try:
                     response = await bound_model.ainvoke(messages)
                 except Exception as error:
+                    # 统一包装成脱敏异常，避免原始错误带出请求内容。
                     raise map_deepseek_error(error) from None
                 last_response = response
                 tool_calls = _tool_calls(response)
@@ -237,6 +243,7 @@ class AgentRunner:
                         tool_call_records=tuple(tool_call_records),
                     )
 
+                # 已达调用上限时不再执行新工具，直接安全返回。
                 if executed >= self.settings.agent_max_tool_calls:
                     return AgentRunResult(
                         text=_limit_text(response, executed, tool_results),
@@ -287,6 +294,7 @@ class AgentRunner:
             try:
                 await stack.aclose()
             except Exception:
+                # 关闭阶段的异常不应掩盖本次运行的结果。
                 pass
 
     def invoke(
@@ -331,6 +339,7 @@ def create_agent_runner(
 
 
 async def _invoke_tool(tool_map: Mapping[str, Any], name: Any, arguments: Any) -> str:
+    """调用已注册工具，并把各类失败转成结构化的错误结果。"""
     if not isinstance(name, str) or name not in tool_map:
         return _json_error("unknown_tool", "模型请求了未注册的工具。")
     if not isinstance(arguments, Mapping):

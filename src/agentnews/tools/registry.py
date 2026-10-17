@@ -13,6 +13,7 @@ from .path_security import ManagedPathResolver
 
 
 class _StrictToolInput(BaseModel):
+    """工具入参基类：禁止未声明的额外字段。"""
     model_config = ConfigDict(extra="forbid")
 
 
@@ -193,6 +194,7 @@ def create_local_file_tools(
 
 
 def _run_tool(operation: Any) -> str:
+    """执行文件操作，并把结果或异常统一包装成 JSON 信封。"""
     try:
         result = operation()
     except FileToolError as error:
@@ -207,6 +209,7 @@ def _run_tool(operation: Any) -> str:
                 },
             }
         )
+    # 兜底异常不向 Agent 暴露内部细节。
     except Exception:
         return _json_envelope(
             {
@@ -223,6 +226,7 @@ def _run_tool(operation: Any) -> str:
 
 
 def _handle_validation_error(error: ValidationError) -> str:
+    """把参数校验失败转换成带字段明细的错误信封。"""
     details = []
     for item in error.errors(include_url=False):
         field = ".".join(str(part) for part in item.get("loc", ()))
@@ -246,4 +250,5 @@ def _handle_validation_error(error: ValidationError) -> str:
 
 
 def _json_envelope(value: dict[str, Any]) -> str:
+    """序列化为键有序的紧凑 JSON，保证输出稳定可比。"""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

@@ -1,3 +1,8 @@
+"""AgentNews 的 FastAPI 应用：负责组装服务依赖并暴露 HTTP 接口。
+
+主要覆盖会话对话、日报生成、报告与来源查询、偏好设置和邮件投递等接口。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -60,6 +65,8 @@ logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
+    """带业务错误码与 HTTP 状态码的接口异常。"""
+
     def __init__(self, status_code: int, code: str, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -68,10 +75,14 @@ class ApiError(Exception):
 
 
 class _StrictModel(BaseModel):
+    """请求模型基类：拒绝未声明的字段。"""
+
     model_config = ConfigDict(extra="forbid")
 
 
 class ChatRequest(_StrictModel):
+    """对话请求体：会话 ID 可选，消息内容必填。"""
+
     session_id: str | None = None
     message: str = Field(min_length=1)
 
@@ -87,6 +98,8 @@ class ChatRequest(_StrictModel):
 
 
 class SettingsPayload(_StrictModel):
+    """偏好设置请求体，含日报主题、关键词与每日定时发送配置。"""
+
     display_name: str = ""
     email: str = ""
     timezone: str = "Asia/Shanghai"
@@ -102,6 +115,8 @@ class SettingsPayload(_StrictModel):
 
 
 class SessionTitlePayload(_StrictModel):
+    """会话重命名请求体。"""
+
     title: str = Field(min_length=1)
 
     @field_validator("title")
@@ -114,10 +129,14 @@ class SessionTitlePayload(_StrictModel):
 
 
 class BashApprovalPayload(_StrictModel):
+    """Bash 命令执行的人工审核结论。"""
+
     decision: Literal["approve", "reject"]
 
 
 class EmailSendPayload(_StrictModel):
+    """日报邮件发送请求体，`resend` 表示是否允许重复发送。"""
+
     resend: bool = Field(default=False, strict=True)
 
 
@@ -162,6 +181,7 @@ def create_app(
     resolved_digest_service = digest_service
 
     def get_digest_service() -> DigestService:
+        # 惰性创建：未注入服务时才初始化，避免构造应用时立即拉起 Agent。
         nonlocal resolved_digest_service
         if resolved_digest_service is None:
             resolved_digest_service = DigestService(
@@ -209,6 +229,7 @@ def create_app(
                 "日报流程执行失败，未确认生成成功。",
             )
         except Exception:
+            # 兜底转成工具错误返回给 Agent，避免整个对话流程中断。
             logger.exception("Agent 请求日报生成失败")
             return _json_tool_error(
                 "digest_error",
@@ -226,6 +247,9 @@ def create_app(
                     "source_count": len(app_repository.get_report_sources(result.report_id)),
                     "source_archive_paths": list(result.source_archive_paths),
                     "tool_calls": result.tool_calls,
+                    "summary": (
+                        report.summary if report is not None else result.summary
+                    )[:240],
                 },
             }
         )
@@ -234,7 +258,9 @@ def create_app(
         report_id: int | None,
         resend: bool,
     ) -> str:
+        """以自然语言方式触发日报邮件发送，返回 JSON 字符串投递结果。"""
         try:
+            # 邮件发送是阻塞 IO，放到线程中执行，避免拖住事件循环。
             result = await asyncio.to_thread(
                 email_service.send_report,
                 report_id,
@@ -277,6 +303,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        """应用生命周期：启动定时日报调度器，退出时确保其停止。"""
         resolved_scheduler.start()
         try:
             yield
@@ -460,6 +487,7 @@ def create_app(
         try:
             existing = app_repository.get_preferences()
             values = payload.model_dump()
+            # 未显式传入的自动发送字段沿用旧值，避免部分更新把它们重置。
             if "daily_send_enabled" not in payload.model_fields_set:
                 values["daily_send_enabled"] = existing.daily_send_enabled
             if "daily_send_time" not in payload.model_fields_set:
@@ -728,6 +756,7 @@ def _validate_automatic_send_configuration(
         raise ApiError(422, "invalid_recipient", "收件邮箱格式无效") from None
     try:
         host, _port, username, password, sender = settings.require_smtp()
+        # 此处只需确认 SMTP 配置齐全，未参与校验的返回值直接丢弃。
         _ = (host, username, password)
         _validate_email_address(sender)
     except ValueError:
@@ -766,6 +795,7 @@ def _message_to_dict(message: ChatMessage) -> dict[str, Any]:
 
 
 def _find_report(repository: RepositoryProtocol, report_id: int):
+    # bool 是 int 的子类，需显式排除，避免 True 被当成 1 通过校验。
     if isinstance(report_id, bool) or report_id < 1:
         raise ApiError(404, "report_not_found", "日报不存在")
     report = repository.get_report(report_id)
@@ -830,6 +860,7 @@ def _email_delivery_to_dict(delivery: Any, attempts: tuple[Any, ...]) -> dict[st
 
 
 def _json_result(value: Any) -> str:
+    # 固定键顺序和分隔符，保证 Agent 工具返回的 JSON 稳定可复现。
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -848,6 +879,7 @@ def _raise_chat_run_error(run: Any) -> None:
     raise ApiError(502, "agent_error", "Agent 暂时无法处理该请求，请稍后重试。")
 
 
+# 模块级实例，供 uvicorn 等 ASGI 服务器直接引用。
 app = create_app()
 
 

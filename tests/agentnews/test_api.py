@@ -125,6 +125,7 @@ def test_chat_exposes_one_digest_tool_call_to_the_model(tmp_path):
             source_archive_paths=(),
             tool_calls=2,
             final_text="日报正文",
+            summary="本期要点",
         )
     )
     repository = InMemoryRepository()
@@ -141,6 +142,7 @@ def test_chat_exposes_one_digest_tool_call_to_the_model(tmp_path):
 
     assert response.status_code == 200
     assert '"report_id":1' in response.json()["answer"]
+    assert '"summary":"本期要点"' in response.json()["answer"]
     assert len(digest.calls) == 1
     preferences, _business_date = digest.calls[0]
     assert preferences.topics == ("比亚迪",)

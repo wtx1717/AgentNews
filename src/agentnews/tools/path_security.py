@@ -1,3 +1,6 @@
+"""受管根目录内的路径解析与安全校验。
+解析符号链接后仍要求路径不越界，并拦截受保护的文件名。
+"""
 from __future__ import annotations
 
 import os
@@ -43,6 +46,7 @@ class ManagedPathResolver:
         *,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     ) -> None:
+        """解析并固定托管根目录，同时校验文件大小上限。"""
         if (
             isinstance(max_file_size_bytes, bool)
             or not isinstance(max_file_size_bytes, int)
@@ -73,11 +77,13 @@ class ManagedPathResolver:
 
         posix_path = PurePosixPath(raw_path)
         windows_path = PureWindowsPath(raw_path)
+        # 同时按 POSIX 与 Windows 两种写法检查，避免分隔符差异绕过。
         if any(part == ".." for part in (*posix_path.parts, *windows_path.parts)):
             raise UnsafePathError("parent-directory traversal is not allowed")
         if windows_path.drive and not windows_path.is_absolute():
             raise UnsafePathError("drive-relative paths are not allowed")
 
+        # 在 POSIX 上也要把反斜杠当作分隔符处理，两侧语义保持一致。
         native_path = Path(raw_path.replace("\\", os.sep))
         is_absolute = (
             native_path.is_absolute()
@@ -86,6 +92,7 @@ class ManagedPathResolver:
         )
         candidate = native_path if is_absolute else self.root / native_path
 
+        # 解析前先按字面路径拦敏感名，解析后再按真实路径复查一次。
         self._reject_sensitive(candidate, check_lexical=True)
         resolved = candidate.resolve(strict=False)
         self._ensure_contained(resolved)
@@ -109,6 +116,7 @@ class ManagedPathResolver:
             raise FileNotFoundError(raw_path)
         if expected_type != "file":
             raise PathTypeError("only a missing file target may be allowed")
+        # 解析后不存在但字面路径是链接，说明这是悬空链接。
         if candidate.is_symlink():
             raise UnsafePathError("a dangling symbolic link is not a valid file target")
 
@@ -126,6 +134,7 @@ class ManagedPathResolver:
         """Read a bounded UTF-8 text file after applying path checks."""
         target = self.resolve(path, expected_type="file")
         with target.open("rb") as file:
+            # 多读 1 字节，用于区分恰好达到上限与已经超限。
             content = file.read(self.max_file_size_bytes + 1)
         if len(content) > self.max_file_size_bytes:
             raise FileTooLargeError("file exceeds the configured size limit")
@@ -152,12 +161,14 @@ class ManagedPathResolver:
         return encoded
 
     def _ensure_contained(self, path: Path) -> None:
+        """确认路径仍在托管根目录内，否则视为越界。"""
         try:
             path.relative_to(self.root)
         except ValueError:
             raise UnsafePathError("path escapes the managed root") from None
 
     def _reject_sensitive(self, path: Path, *, check_lexical: bool = False) -> None:
+        """逐级检查相对托管根的路径片段是否命中受保护名单。"""
         candidate = path
         if check_lexical:
             candidate = path.absolute()
@@ -171,6 +182,7 @@ class ManagedPathResolver:
 
     @staticmethod
     def _is_sensitive_component(name: str) -> bool:
+        """判断单个路径片段是否为受保护的文件名。"""
         normalized = name.casefold()
         if normalized.startswith(".env"):
             return True
