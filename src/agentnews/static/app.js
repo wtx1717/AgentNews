@@ -417,9 +417,16 @@ function appendMessage(role, text) {
   const label = document.createElement("p");
   label.className = "message-role";
   label.textContent = { user: "你", assistant: "助手", system: "系统", tool: "工具" }[role] || role;
-  const body = document.createElement("p");
+  const body = document.createElement("div");
   body.className = "message-body";
-  body.textContent = text;
+  // Assistant replies are Markdown and get the shared safe renderer. Everything
+  // the user typed stays literal so their input is never reinterpreted.
+  if (role === "assistant" && text && markdown) {
+    body.className = "message-body markdown-body";
+    renderMarkdown(body, text);
+  } else {
+    body.textContent = text;
+  }
   article.append(label, body);
   elements.chatMessages.append(article);
 }

@@ -602,6 +602,9 @@ def _alignment_style(alignment: str) -> str:
 
 def _safe_href(value: str) -> str | None:
     candidate = value.strip()
+    if candidate.startswith("<") and candidate.endswith(">"):
+        # CommonMark allows `[label](<url>)`; stored reports used that form.
+        candidate = candidate[1:-1].strip()
     if not candidate or any(character in candidate for character in ("\n", "\r", " ", '"', "'", "<", ">")):
         return None
     try:

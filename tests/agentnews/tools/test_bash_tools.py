@@ -73,6 +73,15 @@ def test_bash_description_prioritizes_report_actions():
     assert "Windows PowerShell 5.1" in tool.description
 
 
+def test_bash_description_exposes_general_fallbacks():
+    tool = create_bash_tool(lambda _command, _explanation: asyncio.sleep(0, result='{"ok":true}'))
+
+    assert "downloading files or images" in tool.description
+    assert "Invoke-WebRequest" in tool.description
+    assert "data/downloads/photo.jpg" in tool.description
+    assert "python" in tool.description
+
+
 def test_resolver_prefers_powershell_seven(monkeypatch):
     resolved = {
         "pwsh": POWERSHELL_SEVEN,

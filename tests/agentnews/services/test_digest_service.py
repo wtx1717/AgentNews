@@ -238,10 +238,16 @@ def test_run_once_separates_preferences_from_user_request_and_archives_sources(t
     assert indexed_source.url == "https://example.com/news"
     assert indexed_source.archive_file_path == digest.source_archive_paths[0]
     prompt_call, system_prompt, task_context = runner.calls[0]
-    assert prompt_call == "请根据本次任务上下文生成一次性新闻日报，并保留真实来源 URL。"
+    assert prompt_call == (
+        "请根据本次任务上下文检索并撰写一份新闻日报。只返回日报 Markdown 正文，"
+        "从一级标题开始，不要附加任何过程说明。"
+    )
     assert "人工智能" in task_context and "Agent" in task_context
     assert "2026-10-14" in task_context and "日报系统提示词" not in task_context
     assert "一次性日报任务系统提示词" in system_prompt
+    assert "日报 Markdown 输出规则" in system_prompt
+    assert "来源正文归档规则" in system_prompt
+    assert "搜索与网页正文抓取规则" in system_prompt
 
 
 def test_agent_heading_becomes_the_report_title(tmp_path):
@@ -620,3 +626,192 @@ def test_binary_fetch_result_is_never_archived(tmp_path):
     digest = asyncio.run(service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 14)))
 
     assert digest.source_archive_paths == ()
+
+
+def test_agent_report_strips_preamble_and_curates_cited_sources(tmp_path):
+    agent_text = (
+        "I now have verified evidence. Here is the daily report.\n\n"
+        "---\n\n"
+        "# 比亚迪固态电池时间表落定\n\n"
+        "## 今日要点\n\n"
+        "- 2027 年小批量装车\n"
+        "- 2030 年规模化量产\n\n"
+        "## 事件进展\n\n"
+        "比亚迪公布时间表，详见[报道](https://example.com/a)。\n\n"
+        "## 来源\n\n"
+        "- [引用来源](https://example.com/a)\n"
+        "- [无关来源](https://example.com/b)\n"
+    )
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {
+                    "results": [
+                        {
+                            "title": "引用来源",
+                            "url": "https://example.com/a",
+                            "content": "摘要一",
+                            "source_site": "示例站",
+                            "published_date": "2026-10-16",
+                        },
+                        {
+                            "title": "无关来源",
+                            "url": "https://example.com/b",
+                            "content": "摘要二",
+                        },
+                    ]
+                },
+                "search-1",
+            ),
+            _record(
+                "fetch_webpage",
+                {"url": "https://example.com/a", "title": "引用来源", "text": "正文一"},
+                "fetch-1",
+            ),
+            text=agent_text,
+        )
+    )
+    repository = _repository()
+    service = DigestService(runner, repository=repository, settings=_settings(tmp_path))
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["比亚迪"]), date(2026, 10, 17))
+    )
+
+    assert digest.title == "比亚迪固态电池时间表落定"
+    assert digest.summary == "2027 年小批量装车；2030 年规模化量产"
+    stored = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert stored.startswith("# 比亚迪固态电池时间表落定\n\n")
+    assert "I now have verified evidence" not in stored
+    assert "\n## 来源\n" not in stored
+    assert "无关来源" not in stored
+    assert "## 参考来源" in stored
+    assert "- [引用来源](https://example.com/a)（示例站，2026-10-16）" in stored
+    assert "](<" not in stored
+    assert [source.url for source in repository.get_report_sources(digest.report_id)] == [
+        "https://example.com/a"
+    ]
+    assert len(digest.source_archive_paths) == 1
+    assert repository.get_report(digest.report_id).summary == digest.summary
+
+
+def test_uncited_report_keeps_only_fetched_sources(tmp_path):
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {
+                    "results": [
+                        {"title": "已读", "url": "https://example.com/a", "content": "摘要一"},
+                        {"title": "仅搜索", "url": "https://example.com/b", "content": "摘要二"},
+                    ]
+                },
+                "search-1",
+            ),
+            _record(
+                "fetch_webpage",
+                {"url": "https://example.com/a", "title": "已读", "text": "正文一"},
+                "fetch-1",
+            ),
+            text="# 芯片产业动态\n\n正文没有引用任何链接。",
+        )
+    )
+    repository = _repository()
+    service = DigestService(runner, repository=repository, settings=_settings(tmp_path))
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["芯片"]), date(2026, 10, 17))
+    )
+
+    assert [source.url for source in repository.get_report_sources(digest.report_id)] == [
+        "https://example.com/a"
+    ]
+    stored = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert "https://example.com/a" in stored
+    assert "https://example.com/b" not in stored
+
+
+def test_task_context_and_reference_lines_carry_window_and_metadata(tmp_path):
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {
+                    "results": [
+                        {
+                            "title": "标题",
+                            "url": "https://example.com/x",
+                            "content": "摘要",
+                            "source_site": "示例站",
+                            "published_date": "2026-10-16",
+                        }
+                    ]
+                },
+                "search-1",
+            ),
+            text="# 标题\n\n正文 [来源](https://example.com/x)。",
+        )
+    )
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 17))
+    )
+
+    _, _, task_context = runner.calls[0]
+    assert "业务日期：2026-10-17（星期六）" in task_context
+    assert "检索窗口：2026-10-11 至 2026-10-17" in task_context
+    assert "优先 2026-10-15 至 2026-10-17" in task_context
+    assert "报告语言：简体中文" in task_context
+    stored = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert "- [标题](https://example.com/x)（示例站，2026-10-16）" in stored
+
+
+def test_trailing_process_notes_are_removed_from_the_report(tmp_path):
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {"results": [{"title": "标题", "url": "https://example.com/x", "content": "摘要"}]},
+                "search-1",
+            ),
+            text=(
+                "# 标题\n\n正文。\n\n"
+                "**证据说明**：本次实际抓取 2 篇正文。\n"
+            ),
+        )
+    )
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 17))
+    )
+
+    assert digest.final_text == "# 标题\n\n正文。"
+    stored = ReportStorage(tmp_path / "reports").read_report(digest.report_path)
+    assert "证据说明" not in stored
+    assert "实际抓取" not in stored
+
+
+def test_h1_inside_a_code_fence_is_not_the_report_title(tmp_path):
+    runner = FakeRunner(
+        _result(
+            _record(
+                "web_search",
+                {"results": [{"title": "标题", "url": "https://example.com/x", "content": "摘要"}]},
+                "search-1",
+            ),
+            text=(
+                "```text\n# 不是标题\n```\n\n"
+                "# 真正的标题\n\n正文 [来源](https://example.com/x)。"
+            ),
+        )
+    )
+    service = DigestService(runner, repository=_repository(), settings=_settings(tmp_path))
+
+    digest = asyncio.run(
+        service.run_once(DigestPreferences(topics=["AI"]), date(2026, 10, 17))
+    )
+
+    assert digest.title == "真正的标题"

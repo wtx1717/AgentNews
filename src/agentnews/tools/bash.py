@@ -323,12 +323,17 @@ def create_bash_tool(
         coroutine=run_bash,
         name="bash",
         description=(
-            "Request a PowerShell command when the other tools cannot complete the task. "
-            "PowerShell 7 (pwsh) is preferred; Windows PowerShell 5.1 is used when pwsh "
-            "is not installed. The user must approve every call before it executes. "
-            "Include a concise, user-facing explanation of the command's purpose. The "
-            "working directory is the AgentNews project root. For report operations, "
-            "prefer these built-in actions instead of raw Remove-Item: "
+            "Run a PowerShell command when the dedicated tools cannot complete the job. "
+            "Use it as the general fallback for tasks such as downloading files or images "
+            "from the web (`Invoke-WebRequest` or `curl`), unpacking or converting files, "
+            "running CLIs such as `python`, `node`, `tar` or `ffmpeg`, inspecting the "
+            "environment, or combining several steps in one command. The working directory "
+            "is the AgentNews project root, so prefer relative paths such as "
+            "`data/downloads/photo.jpg`. PowerShell 7 (pwsh) is preferred; Windows "
+            "PowerShell 5.1 is used when pwsh is not installed. The user must approve every "
+            "call before it executes; include a concise, user-facing explanation of the "
+            "command's purpose. For report operations, prefer these built-in actions "
+            "instead of raw Remove-Item: "
             "`agentnews reports list`, `agentnews reports read --id <positive integer>`, "
             "`agentnews reports search --keyword <text>`, "
             "`agentnews reports delete --id <positive integer>`, and "

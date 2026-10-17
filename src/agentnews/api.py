@@ -226,6 +226,9 @@ def create_app(
                     "source_count": len(app_repository.get_report_sources(result.report_id)),
                     "source_archive_paths": list(result.source_archive_paths),
                     "tool_calls": result.tool_calls,
+                    "summary": (
+                        report.summary if report is not None else result.summary
+                    )[:240],
                 },
             }
         )

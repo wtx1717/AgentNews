@@ -322,7 +322,15 @@
         } else if (pattern.type === "strike") {
           node = { type: "strike", children: parseInline(match[1]) };
         } else if (pattern.type === "link" || pattern.type === "image") {
-          var href = safeHttpUrl(match[2]);
+          var destination = match[2];
+          if (
+            destination.length > 1 &&
+            destination.charAt(0) === "<" &&
+            destination.charAt(destination.length - 1) === ">"
+          ) {
+            destination = destination.slice(1, -1);
+          }
+          var href = safeHttpUrl(destination);
           if (href) {
             node =
               pattern.type === "image"

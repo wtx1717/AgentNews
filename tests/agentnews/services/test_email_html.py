@@ -99,6 +99,13 @@ def test_links_with_balanced_parentheses_are_kept_whole() -> None:
     assert 'href="https://example.com/x?q=(a)b"' in html
 
 
+def test_angle_bracket_link_destinations_are_clickable() -> None:
+    html = markdown_to_email_html("- [来源](<https://example.com/a>)")
+
+    assert 'href="https://example.com/a"' in html
+    assert "&lt;https" not in html
+
+
 def test_empty_and_whitespace_markdown_render_without_blocks() -> None:
     assert markdown_to_email_html("").strip() == ""
     assert markdown_to_email_html("   \n\n  ").strip() == ""

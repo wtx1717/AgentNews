@@ -88,6 +88,28 @@ Saving the same report path and content is idempotent; different content at an
 existing report path is rejected. Identical content for different report IDs is
 stored separately and has the same SHA-256 content hash.
 
+## Prompt engineering
+
+Scenario prompts live in `src/agentnews/agent/prompts/<scene>/vN.md` and are
+loaded through `prompt_catalog.py`. Five scenes are registered: `interaction`,
+`web_research`, `digest_system`, `digest_markdown` and `source_archive`. `v2` is
+the current default; `v1` stays registered for rollback and comparison.
+
+`interaction` defines the chat voice: concise answers, limited Markdown, real
+source links, and no restating of a digest that was just generated. It also
+defines tool selection: structured tools first, then the approved `bash`
+fallback for anything they cannot do (file and image downloads, CLIs, format
+conversion, multi-step shell work). The digest service composes
+`digest_system`, `web_research`, `source_archive` and `digest_markdown` into one
+system message, so the report contract (specific heading, no preamble, no
+process notes, no self-built source list) is described in one place.
+
+Assistant chat messages are rendered with the same safe renderer used for
+reports (`static/markdown-render.js`); user messages stay literal. On the report
+side, `DigestService` strips agent preamble and process sections, keeps only the
+sources actually cited in the body (falling back to fetched sources), and
+appends one curated `## 参考来源` list.
+
 ## Test
 
 ```powershell
@@ -113,12 +135,13 @@ uv run pytest
 
 ## Human-approved Bash
 
-The Agent may request `bash(command, explanation)` when the registered
-structured tools cannot complete an explicitly requested task. The browser
-shows the exact command, the model's short purpose statement, the working
-directory, the resolved interpreter, inherited-environment policy, timeout,
-and output limit. A user must approve every call; a rejection is returned to
-the model as a tool result.
+The Agent uses the structured tools first and falls back to `bash(command,
+explanation)` whenever they cannot complete a task — for example downloading
+images or files, running CLIs, converting formats, or combining several steps.
+No command allowlist is applied: the browser shows the exact command, the
+model's short purpose statement, the working directory, the resolved
+interpreter, inherited-environment policy, timeout, and output limit. A user
+must approve every call; a rejection is returned to the model as a tool result.
 
 The interpreter is resolved when the command runs: `pwsh` is preferred and
 looked up on `PATH`, then in the usual PowerShell 7 install locations

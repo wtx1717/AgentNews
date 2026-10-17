@@ -170,6 +170,19 @@ test("emphasis, code spans and links parse into inline nodes", () => {
   assert.equal(nodes[6].children[0].value, "链接");
 });
 
+test("angle-bracket link destinations stay clickable", () => {
+  const nodes = markdown.parseInline("[文档](<https://example.com/a>)");
+  assert.deepEqual(nodes.map((node) => node.type), ["link"]);
+  assert.equal(nodes[0].href, "https://example.com/a");
+  assert.equal(nodes[0].children[0].value, "文档");
+
+  const container = render("- [来源](<https://example.com/a>)");
+  const item = container.children[0].children[0];
+  const anchor = childrenByTag(item, "A")[0];
+  assert.ok(anchor);
+  assert.equal(anchor.href, "https://example.com/a");
+});
+
 test("raw HTML in stored markdown stays text", () => {
   const payload = "段落里含 <script>alert(1)</script> 与 <img src=x onerror=alert(2)>";
   const container = render(payload);

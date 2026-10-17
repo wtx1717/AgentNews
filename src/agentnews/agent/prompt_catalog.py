@@ -21,24 +21,34 @@ class _PromptScenario:
 _PROMPTS: Mapping[str, _PromptScenario] = MappingProxyType(
     {
         "interaction": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "interaction/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "interaction/v1.md", "v2": "interaction/v2.md"}
+            ),
         ),
         "web_research": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "web_research/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "web_research/v1.md", "v2": "web_research/v2.md"}
+            ),
         ),
         "digest_system": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "digest_system/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "digest_system/v1.md", "v2": "digest_system/v2.md"}
+            ),
         ),
         "digest_markdown": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "digest_markdown/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "digest_markdown/v1.md", "v2": "digest_markdown/v2.md"}
+            ),
         ),
         "source_archive": _PromptScenario(
-            default_version="v1",
-            resources=MappingProxyType({"v1": "source_archive/v1.md"}),
+            default_version="v2",
+            resources=MappingProxyType(
+                {"v1": "source_archive/v1.md", "v2": "source_archive/v2.md"}
+            ),
         ),
     }
 )
