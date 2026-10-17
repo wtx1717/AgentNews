@@ -119,7 +119,11 @@ def test_success_duplicate_idempotency_and_explicit_resend(tmp_path):
     message, recipients = smtp.messages[0]
     assert recipients == ["user@example.test"]
     assert message["Subject"] == "AgentNews 日报 | 2026-10-16 | 测试日报"
-    assert "仅来自已保存的报告正文" in message.get_content()
+    parts = list(message.iter_parts())
+    assert [part.get_content_type() for part in parts] == ["text/plain", "text/html"]
+    assert "仅来自已保存的报告正文" in parts[0].get_content()
+    assert "今日新闻" in parts[1].get_content()
+    assert "仅来自已保存的报告正文" in parts[1].get_content()
     assert smtp.logins == [("agentnews", "test-secret"), ("agentnews", "test-secret")]
     assert repository.list_email_delivery_attempts(first.delivery.id)[0].status == "sent"
 
