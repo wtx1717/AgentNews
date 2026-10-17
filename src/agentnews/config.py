@@ -27,8 +27,10 @@ class Settings(BaseSettings):
     mcp_search_api_key: SecretStr | None = None
     mcp_search_timeout: float = Field(default=20.0, gt=0)
     smtp_host: str | None = None
-    smtp_port: int = Field(default=587, ge=1, le=65535)
-    smtp_use_ssl: bool = False
+    # 默认 465 隐式 TLS，与 163、QQ 等常用邮箱一致；服务商要求 587 + STARTTLS 时
+    # 显式设置 SMTP_PORT=587、SMTP_USE_SSL=false 即可。
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_use_ssl: bool = True
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None

@@ -63,9 +63,11 @@ class RecordingSMTPFactory:
 def _settings(*, smtp=True):
     values = {"_env_file": None}
     if smtp:
+        # 这里显式走 587 + STARTTLS，与隐式 TLS 的用例区分开。
         values.update(
             smtp_host="smtp.example.test",
             smtp_port=587,
+            smtp_use_ssl=False,
             smtp_user="agentnews",
             smtp_password="test-secret",
             smtp_from="reports@example.test",

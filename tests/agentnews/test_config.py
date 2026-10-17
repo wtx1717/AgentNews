@@ -10,7 +10,8 @@ def test_local_defaults_load_without_service_credentials():
     assert settings.app_timezone == "Asia/Shanghai"
     assert settings.report_root.as_posix() == "data/reports"
     assert settings.sqlite_path.as_posix() == "data/agentnews.sqlite3"
-    assert settings.smtp_port == 587
+    assert settings.smtp_port == 465
+    assert settings.smtp_use_ssl is True
     assert settings.deepseek_api_key is None
     assert settings.deepseek_timeout == 30
     assert settings.deepseek_max_retries == 2
@@ -151,5 +152,5 @@ def test_service_configurations_return_validated_values():
     assert search_url == "https://search.example/mcp"
     assert search_key.get_secret_value() == "search-secret"
     host, port, user, password, sender = settings.require_smtp()
-    assert (host, port, user, sender) == ("smtp.example.com", 587, "user", "agent@example.com")
+    assert (host, port, user, sender) == ("smtp.example.com", 465, "user", "agent@example.com")
     assert password.get_secret_value() == "smtp-secret"

@@ -144,7 +144,13 @@ def test_injected_smtp_factory_also_mocks_implicit_tls(tmp_path):
     assert isinstance(context, ssl.SSLContext)
 
 
-def test_smtp_use_ssl_is_read_from_environment(monkeypatch):
-    monkeypatch.setenv("SMTP_USE_SSL", "true")
-
+def test_smtp_use_ssl_defaults_to_true_and_can_be_disabled(monkeypatch):
+    assert Settings(_env_file=None).smtp_port == 465
     assert Settings(_env_file=None).smtp_use_ssl is True
+
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_USE_SSL", "false")
+
+    settings = Settings(_env_file=None)
+    assert settings.smtp_port == 587
+    assert settings.smtp_use_ssl is False

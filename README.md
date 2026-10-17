@@ -52,8 +52,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
    服务时才需要改；`MCP_SEARCH_TIMEOUT` 默认 20 秒。不要把 key 放进 URL、代码
    或聊天记录。
 4. 启用邮件时填写 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、`SMTP_PASSWORD` 和
-   `SMTP_FROM`。默认走 `587` + STARTTLS；使用 `465` 隐式 TLS 时把
-   `SMTP_USE_SSL=true`。邮件凭据可以先保留示例占位值，不影响其它功能启动，真正
+   `SMTP_FROM`。默认走 `465` 隐式 TLS（163、QQ 等常用邮箱的端口，`SMTP_USE_SSL`
+   默认为 `true`）；服务商要求 `587` + STARTTLS 时把 `SMTP_PORT` 改成 `587` 并把
+   `SMTP_USE_SSL=false`。邮件凭据可以先保留示例占位值，不影响其它功能启动，真正
    发信前再替换成真实值。
 5. 本地路径默认值是 `APP_TIMEZONE=Asia/Shanghai`、`REPORT_ROOT=data/reports`、
    `SOURCE_ARCHIVE_ROOT=data/source_archive`、`TEMP_ROOT=data/tmp` 和
