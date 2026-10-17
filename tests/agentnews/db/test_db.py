@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "chat_sessions",
     "chat_messages",
     "email_deliveries",
+    "scheduled_digest_runs",
 }
 
 
@@ -27,19 +28,22 @@ def table_names(connection):
 def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
     database_path = tmp_path / "nested" / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1, 2]
+    assert initialize_database(database_path) == [1, 2, 3, 4, 5, 6]
 
     connection = connect_database(database_path)
     try:
         assert EXPECTED_TABLES <= table_names(connection)
         preference = connection.execute(
-            "SELECT id, timezone, topics_json, keywords_json FROM user_preferences"
+            "SELECT id, timezone, topics_json, keywords_json, daily_send_enabled, daily_send_time "
+            "FROM user_preferences"
         ).fetchone()
         assert dict(preference) == {
             "id": 1,
             "timezone": "Asia/Shanghai",
             "topics_json": "[]",
             "keywords_json": "[]",
+            "daily_send_enabled": 0,
+            "daily_send_time": "08:00",
         }
         migration = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -47,7 +51,10 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
         assert (migration["version"], migration["name"]) == (1, "initial_schema")
         assert connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()["version"] == 2
+        ).fetchone()["version"] == 6
+        assert {row["name"] for row in connection.execute(
+            "PRAGMA table_info(chat_sessions)"
+        )} >= {"status", "archived_at"}
         assert "archive_file_path" in {
             row["name"] for row in connection.execute("PRAGMA table_info(report_sources)")
         }
@@ -58,14 +65,14 @@ def test_empty_database_initializes_schema_and_default_preferences(tmp_path):
 def test_repeated_initialization_is_idempotent(tmp_path):
     database_path = tmp_path / "agentnews.sqlite3"
 
-    assert initialize_database(database_path) == [1, 2]
+    assert initialize_database(database_path) == [1, 2, 3, 4, 5, 6]
     assert initialize_database(database_path) == []
 
     connection = connect_database(database_path)
     try:
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM schema_migrations"
-        ).fetchone()["count"] == 2
+        ).fetchone()["count"] == 6
         assert connection.execute(
             "SELECT COUNT(*) AS count FROM user_preferences"
         ).fetchone()["count"] == 1
@@ -74,7 +81,7 @@ def test_repeated_initialization_is_idempotent(tmp_path):
 
 
 def test_migrations_have_contiguous_versions():
-    assert [migration.version for migration in MIGRATIONS] == [1, 2]
+    assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
 
 
 def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_path):
@@ -103,7 +110,7 @@ def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_pat
     finally:
         connection.close()
 
-    assert initialize_database(database_path) == [2]
+    assert initialize_database(database_path) == [2, 3, 4, 5, 6]
 
     upgraded = connect_database(database_path)
     try:
@@ -117,7 +124,7 @@ def test_archive_path_migration_is_idempotent_when_column_already_exists(tmp_pat
             for row in upgraded.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-        ] == [1, 2]
+            ] == [1, 2, 3, 4, 5, 6]
         source = upgraded.execute(
             "SELECT report_id, archive_file_path FROM report_sources"
         ).fetchone()
@@ -209,6 +216,18 @@ def test_v1_database_upgrades_without_losing_rows(tmp_path):
             "snippet TEXT NOT NULL DEFAULT '', FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE)"
         )
         connection.execute(
+            "CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, title TEXT, "
+            "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+            "role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')), "
+            "content TEXT NOT NULL, metadata_json TEXT, "
+            "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE)"
+        )
+        connection.execute(
             "INSERT INTO reports (id, report_date, title, file_path, content_hash) "
             "VALUES (7, '2026-10-14', '日报', 'daily.md', 'hash')"
         )
@@ -222,7 +241,7 @@ def test_v1_database_upgrades_without_losing_rows(tmp_path):
     finally:
         connection.close()
 
-    assert initialize_database(database_path) == [2]
+    assert initialize_database(database_path) == [2, 3, 4, 5, 6]
     upgraded = connect_database(database_path)
     try:
         assert upgraded.execute(
@@ -235,6 +254,47 @@ def test_v1_database_upgrades_without_losing_rows(tmp_path):
         assert "archive_file_path" in {
             row["name"] for row in upgraded.execute("PRAGMA table_info(report_sources)")
         }
+    finally:
+        upgraded.close()
+
+
+def test_v2_database_upgrades_sessions_and_messages_without_loss(tmp_path):
+    database_path = tmp_path / "v2.sqlite3"
+    assert initialize_database(database_path, migrations=MIGRATIONS[:2]) == [1, 2]
+
+    connection = connect_database(database_path)
+    try:
+        connection.execute(
+            "INSERT INTO chat_sessions (id, title, created_at, updated_at) "
+            "VALUES ('legacy-session', '保留标题', '2026-10-15T00:00:00+00:00', "
+            "'2026-10-15T00:01:00+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO chat_messages (session_id, role, content, metadata_json, created_at) "
+            "VALUES ('legacy-session', 'user', '保留消息', NULL, "
+            "'2026-10-15T00:01:00+00:00')"
+        )
+    finally:
+        connection.close()
+
+    assert initialize_database(database_path) == [3, 4, 5, 6]
+    upgraded = connect_database(database_path)
+    try:
+        session = upgraded.execute(
+            "SELECT id, title, status, archived_at FROM chat_sessions "
+            "WHERE id = 'legacy-session'"
+        ).fetchone()
+        assert dict(session) == {
+            "id": "legacy-session",
+            "title": "保留标题",
+            "status": "active",
+            "archived_at": None,
+        }
+        message = upgraded.execute(
+            "SELECT role, content FROM chat_messages "
+            "WHERE session_id = 'legacy-session'"
+        ).fetchone()
+        assert dict(message) == {"role": "user", "content": "保留消息"}
     finally:
         upgraded.close()
 

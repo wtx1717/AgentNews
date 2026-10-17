@@ -60,6 +60,80 @@ def test_direct_answer_does_not_initialize_search(monkeypatch):
     }
 
 
+def test_bash_is_registered_only_with_approval_handler():
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "bash",
+                        {"command": "Write-Output test", "explanation": "执行测试命令"},
+                        "bash-1",
+                    )
+                ],
+            ),
+            AIMessage(content="已完成"),
+        ]
+    )
+    approvals = []
+
+    async def approval_handler(command, explanation):
+        approvals.append((command, explanation))
+        return '{"ok":true}'
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke(
+            "执行命令",
+            bash_approval_handler=approval_handler,
+        )
+    )
+
+    assert result.text == "已完成"
+    assert "bash" in {tool.name for tool in model.tools}
+    assert approvals == [("Write-Output test", "执行测试命令")]
+
+
+def test_generate_digest_is_registered_only_for_this_invoke_and_replays_results():
+    model = FakeModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "generate_digest",
+                        {"topic": "比亚迪", "keyword": "固态电池"},
+                        "digest-1",
+                    ),
+                    _tool_call(
+                        "generate_digest",
+                        {"topic": "比亚迪", "keyword": "自燃"},
+                        "digest-2",
+                    ),
+                ],
+            ),
+            AIMessage(content="两份日报已生成"),
+        ]
+    )
+    calls = []
+
+    async def digest_handler(topic: str, keyword: str) -> str:
+        calls.append((topic, keyword))
+        return json.dumps({"ok": True, "report_id": len(calls)})
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke(
+            "生成日报",
+            digest_handler=digest_handler,
+        )
+    )
+
+    assert result.text == "两份日报已生成"
+    assert result.tool_calls == 2
+    assert calls == [("比亚迪", "固态电池"), ("比亚迪", "自燃")]
+    assert {tool.name for tool in model.tools} >= {"generate_digest"}
+
+
 def test_file_tool_result_is_returned_to_model(tmp_path):
     data_root = tmp_path / "data"
     data_root.mkdir()

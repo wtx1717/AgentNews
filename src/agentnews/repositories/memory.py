@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 import json
 import threading
@@ -12,11 +13,20 @@ from uuid import uuid4
 from .protocol import (
     ChatMessage,
     ChatSession,
+    EmailDeliveryAttempt,
+    EmailDeliveryRecord,
+    EmailDeliverySource,
+    EmailDeliveryStatus,
     MessageRole,
     ReportRecord,
     ReportReservation,
     ReportSource,
+    ScheduledDigestRun,
+    ScheduledDigestRunStatus,
+    SessionArchivedError,
+    SessionStatus,
     UserPreferences,
+    normalize_daily_send_time,
 )
 
 
@@ -36,9 +46,15 @@ class InMemoryRepository:
         self._reservations: dict[int, ReportReservation] = {}
         self._reports: dict[int, ReportRecord] = {}
         self._report_sources: dict[int, list[ReportSource]] = {}
+        self._email_deliveries: dict[int, EmailDeliveryRecord] = {}
+        self._email_delivery_attempts: dict[int, list[EmailDeliveryAttempt]] = {}
+        self._scheduled_runs: dict[date, ScheduledDigestRun] = {}
+        self._next_scheduled_run_id = 1
         self._next_message_id = 1
         self._next_test_report_id: int | None = None
         self._next_source_id = 1
+        self._next_email_delivery_id = 1
+        self._next_email_attempt_id = 1
 
     def get_preferences(self) -> UserPreferences:
         with self._lock:
@@ -50,6 +66,106 @@ class InMemoryRepository:
             self._preferences = normalized
             return normalized
 
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]:
+        _require_date(business_date, "business_date")
+        _validate_scheduled_status(status)
+        with self._lock:
+            existing = self._scheduled_runs.get(business_date)
+            if existing is not None:
+                return existing, False
+            now = _utc_now()
+            run = ScheduledDigestRun(
+                id=self._next_scheduled_run_id,
+                business_date=business_date,
+                status=status,
+                attempt_count=0,
+                report_id=None,
+                email_delivery_id=None,
+                started_at=None,
+                completed_at=now if status in {"failed", "skipped"} else None,
+                error_code=error_code,
+            )
+            self._next_scheduled_run_id += 1
+            self._scheduled_runs[business_date] = run
+            return run, True
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None:
+        _require_positive_id(run_id, "run_id")
+        with self._lock:
+            for business_date, run in self._scheduled_runs.items():
+                if run.id == run_id:
+                    if run.status != "pending" or run.attempt_count >= 3:
+                        return None
+                    claimed = replace(
+                        run,
+                        status="running",
+                        attempt_count=run.attempt_count + 1,
+                        started_at=_utc_now(),
+                        completed_at=None,
+                    )
+                    self._scheduled_runs[business_date] = claimed
+                    return claimed
+            return None
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None:
+        _require_date(business_date, "business_date")
+        with self._lock:
+            return self._scheduled_runs.get(business_date)
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._scheduled_runs.values(),
+                    key=lambda item: (item.business_date, item.id),
+                    reverse=True,
+                )[:limit]
+            )
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun:
+        _require_positive_id(run_id, "run_id")
+        _validate_scheduled_status(status)
+        if attempt_count is not None and (isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or not 0 <= attempt_count <= 3):
+            raise ValueError("attempt_count must be between 0 and 3")
+        with self._lock:
+            for business_date, run in self._scheduled_runs.items():
+                if run.id == run_id:
+                    updated = replace(
+                        run,
+                        status=status,
+                        attempt_count=run.attempt_count if attempt_count is None else attempt_count,
+                        report_id=run.report_id if report_id is None else report_id,
+                        email_delivery_id=run.email_delivery_id if email_delivery_id is None else email_delivery_id,
+                        started_at=run.started_at if started_at is None else started_at,
+                        completed_at=(
+                            _utc_now() if completed_at is None and status in {"succeeded", "failed", "skipped"}
+                            else completed_at
+                        ),
+                        error_code=error_code,
+                    )
+                    self._scheduled_runs[business_date] = updated
+                    return updated
+            raise KeyError(f"unknown scheduled run: {run_id}")
+
     def create_session(self, title: str | None = None) -> ChatSession:
         if title is not None and not isinstance(title, str):
             raise TypeError("title must be a string or None")
@@ -60,11 +176,90 @@ class InMemoryRepository:
             title=normalized_title,
             created_at=now,
             updated_at=now,
+            status="active",
+            archived_at=None,
         )
         with self._lock:
             self._sessions[session.id] = session
             self._messages[session.id] = []
         return session
+
+    def get_session(self, session_id: str) -> ChatSession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]:
+        _validate_session_listing(status, limit, offset)
+        with self._lock:
+            sessions = [
+                session for session in self._sessions.values() if session.status == status
+            ]
+            sessions.sort(
+                key=lambda session: (session.updated_at, session.created_at, session.id),
+                reverse=True,
+            )
+            return tuple(sessions[offset : offset + limit])
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession:
+        normalized_title = _normalize_session_title(title)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise KeyError(f"unknown session: {session_id}")
+            renamed = ChatSession(
+                id=session.id,
+                title=normalized_title,
+                created_at=session.created_at,
+                updated_at=_utc_now(),
+                status=session.status,
+                archived_at=session.archived_at,
+            )
+            self._sessions[session_id] = renamed
+            return renamed
+
+    def archive_session(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.status != "active":
+                return False
+            archived_at = _utc_now()
+            self._sessions[session_id] = ChatSession(
+                id=session.id,
+                title=session.title,
+                created_at=session.created_at,
+                updated_at=archived_at,
+                status="archived",
+                archived_at=archived_at,
+            )
+            return True
+
+    def restore_session(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.status != "archived":
+                return False
+            restored_at = _utc_now()
+            self._sessions[session_id] = ChatSession(
+                id=session.id,
+                title=session.title,
+                created_at=session.created_at,
+                updated_at=restored_at,
+                status="active",
+                archived_at=None,
+            )
+            return True
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            if self._sessions.pop(session_id, None) is None:
+                return False
+            self._messages.pop(session_id, None)
+            return True
 
     def append_message(
         self,
@@ -82,6 +277,8 @@ class InMemoryRepository:
             session = self._sessions.get(session_id)
             if session is None:
                 raise KeyError(f"unknown session: {session_id}")
+            if session.status == "archived":
+                raise SessionArchivedError(f"session is archived: {session_id}")
             message = ChatMessage(
                 id=self._next_message_id,
                 session_id=session_id,
@@ -92,11 +289,16 @@ class InMemoryRepository:
             )
             self._next_message_id += 1
             self._messages[session_id].append(message)
+            title = session.title
+            if role == "user" and title is None:
+                title = _title_from_user_message(content)
             self._sessions[session_id] = ChatSession(
                 id=session.id,
-                title=session.title,
+                title=title,
                 created_at=session.created_at,
                 updated_at=message.created_at,
+                status=session.status,
+                archived_at=session.archived_at,
             )
             return message
 
@@ -179,6 +381,14 @@ class InMemoryRepository:
             if self._reports.pop(report_id, None) is None:
                 return False
             self._report_sources.pop(report_id, None)
+            delivery_ids = [
+                delivery.id
+                for delivery in self._email_deliveries.values()
+                if delivery.report_id == report_id
+            ]
+            for delivery_id in delivery_ids:
+                self._email_deliveries.pop(delivery_id, None)
+                self._email_delivery_attempts.pop(delivery_id, None)
             return True
 
     def list_reports(
@@ -268,6 +478,129 @@ class InMemoryRepository:
                         return source
             return None
 
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]:
+        _require_positive_id(report_id, "report_id")
+        _validate_delivery_fields(recipient, subject, trigger_source, idempotency_key)
+        with self._lock:
+            if report_id not in self._reports:
+                raise KeyError(f"unknown report: {report_id}")
+            for delivery in self._email_deliveries.values():
+                if delivery.idempotency_key == idempotency_key:
+                    return delivery, False
+            now = _utc_now()
+            delivery = EmailDeliveryRecord(
+                id=self._next_email_delivery_id,
+                report_id=report_id,
+                recipient=recipient,
+                subject=subject,
+                status="pending",
+                error_code=None,
+                error_message=None,
+                retry_count=0,
+                trigger_source=trigger_source,
+                idempotency_key=idempotency_key,
+                requested_at=now,
+                completed_at=None,
+            )
+            self._next_email_delivery_id += 1
+            self._email_deliveries[delivery.id] = delivery
+            self._email_delivery_attempts[delivery.id] = []
+            return delivery, True
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            return self._email_deliveries.get(delivery_id)
+
+    def list_email_deliveries(
+        self, report_id: int
+    ) -> tuple[EmailDeliveryRecord, ...]:
+        _require_positive_id(report_id, "report_id")
+        with self._lock:
+            deliveries = [
+                delivery
+                for delivery in self._email_deliveries.values()
+                if delivery.report_id == report_id
+            ]
+            deliveries.sort(key=lambda item: (item.requested_at, item.id), reverse=True)
+            return tuple(deliveries)
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            return tuple(self._email_delivery_attempts.get(delivery_id, ()))
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt:
+        _require_positive_id(delivery_id, "delivery_id")
+        _validate_delivery_attempt(attempt_number, status, error_code, error_message)
+        with self._lock:
+            if delivery_id not in self._email_deliveries:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            attempts = self._email_delivery_attempts[delivery_id]
+            if any(attempt.attempt_number == attempt_number for attempt in attempts):
+                raise ValueError("duplicate email delivery attempt")
+            now = _utc_now()
+            attempt = EmailDeliveryAttempt(
+                id=self._next_email_attempt_id,
+                delivery_id=delivery_id,
+                attempt_number=attempt_number,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                attempted_at=now,
+                completed_at=now,
+            )
+            self._next_email_attempt_id += 1
+            attempts.append(attempt)
+            return attempt
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord:
+        _require_positive_id(delivery_id, "delivery_id")
+        if status not in {"pending", "sent", "failed"}:
+            raise ValueError("invalid delivery status")
+        if retry_count is not None and (
+            isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
+        ):
+            raise ValueError("retry_count must be a non-negative integer")
+        with self._lock:
+            delivery = self._email_deliveries.get(delivery_id)
+            if delivery is None:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            updated = replace(
+                delivery,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                retry_count=(delivery.retry_count if retry_count is None else retry_count),
+                completed_at=None if status == "pending" else _utc_now(),
+            )
+            self._email_deliveries[delivery_id] = updated
+            return updated
+
 
 def _normalize_preferences(value: UserPreferences) -> UserPreferences:
     if not isinstance(value, UserPreferences):
@@ -278,7 +611,41 @@ def _normalize_preferences(value: UserPreferences) -> UserPreferences:
         timezone=value.timezone,
         topics=value.topics,
         keywords=value.keywords,
+        daily_send_enabled=value.daily_send_enabled,
+        daily_send_time=normalize_daily_send_time(value.daily_send_time),
     )
+
+
+def _validate_scheduled_status(status: str) -> None:
+    if status not in {"pending", "running", "succeeded", "failed", "skipped"}:
+        raise ValueError("invalid scheduled run status")
+
+
+def _validate_session_listing(
+    status: SessionStatus,
+    limit: int,
+    offset: int,
+) -> None:
+    if status not in {"active", "archived"}:
+        raise ValueError("status must be active or archived")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+
+
+def _normalize_session_title(title: str) -> str:
+    if not isinstance(title, str):
+        raise TypeError("title must be a string")
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("title must not be empty")
+    return normalized
+
+
+def _title_from_user_message(content: str) -> str | None:
+    normalized = " ".join(content.split())
+    return normalized[:80] or None
 
 
 def _freeze_metadata(value: Mapping[str, object] | None) -> Mapping[str, object] | None:
@@ -304,6 +671,36 @@ def _freeze_json(value: Any) -> Any:
 def _require_positive_id(value: int, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{field_name} must be a positive integer")
+
+
+def _validate_delivery_fields(
+    recipient: str,
+    subject: str,
+    trigger_source: str,
+    idempotency_key: str,
+) -> None:
+    if not isinstance(recipient, str) or not isinstance(subject, str):
+        raise TypeError("recipient and subject must be strings")
+    if trigger_source not in {"manual_api", "natural_language", "scheduled_task"}:
+        raise ValueError("invalid email delivery source")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("idempotency_key must not be empty")
+
+
+def _validate_delivery_attempt(
+    attempt_number: int,
+    status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
+        raise ValueError("attempt_number must be a positive integer")
+    if status not in {"sent", "failed"}:
+        raise ValueError("invalid email attempt status")
+    if error_code is not None and not isinstance(error_code, str):
+        raise TypeError("error_code must be a string or None")
+    if error_message is not None and not isinstance(error_message, str):
+        raise TypeError("error_message must be a string or None")
 
 
 def _require_date(value: date, field_name: str) -> None:

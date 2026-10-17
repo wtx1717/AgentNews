@@ -8,6 +8,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
+SessionStatus = Literal["active", "archived"]
+EmailDeliveryStatus = Literal["pending", "sent", "failed"]
+EmailDeliverySource = Literal["manual_api", "natural_language", "scheduled_task"]
+ScheduledDigestRunStatus = Literal["pending", "running", "succeeded", "failed", "skipped"]
+
+
+class SessionArchivedError(RuntimeError):
+    """Raised when a write is attempted against an archived session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +25,8 @@ class UserPreferences:
     timezone: str = "Asia/Shanghai"
     topics: tuple[str, ...] | Sequence[str] = ()
     keywords: tuple[str, ...] | Sequence[str] = ()
+    daily_send_enabled: bool = False
+    daily_send_time: str = "08:00"
 
     def __post_init__(self) -> None:
         for name in ("display_name", "email", "timezone"):
@@ -32,6 +42,9 @@ class UserPreferences:
         object.__setattr__(self, "timezone", timezone)
         object.__setattr__(self, "topics", _normalized_values(self.topics, "topics"))
         object.__setattr__(self, "keywords", _normalized_values(self.keywords, "keywords"))
+        if not isinstance(self.daily_send_enabled, bool):
+            raise TypeError("daily_send_enabled must be a boolean")
+        object.__setattr__(self, "daily_send_time", normalize_daily_send_time(self.daily_send_time))
 
 
 def _normalized_values(values: Sequence[str], field_name: str) -> tuple[str, ...]:
@@ -47,12 +60,26 @@ def _normalized_values(values: Sequence[str], field_name: str) -> tuple[str, ...
     return tuple(result)
 
 
+def normalize_daily_send_time(value: str) -> str:
+    """Validate and normalize a daily schedule time to strict ``HH:MM``."""
+    if not isinstance(value, str):
+        raise TypeError("daily_send_time must be a string")
+    if len(value) != 5 or value[2] != ":" or not value[:2].isdigit() or not value[3:].isdigit():
+        raise ValueError("daily_send_time must use HH:MM format")
+    hour, minute = int(value[:2]), int(value[3:])
+    if hour > 23 or minute > 59:
+        raise ValueError("daily_send_time must use HH:MM format")
+    return f"{hour:02d}:{minute:02d}"
+
+
 @dataclass(frozen=True, slots=True)
 class ChatSession:
     id: str
     title: str | None
     created_at: datetime
     updated_at: datetime
+    status: SessionStatus = "active"
+    archived_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +124,47 @@ class ReportSource:
     archive_file_path: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class EmailDeliveryRecord:
+    id: int
+    report_id: int
+    recipient: str
+    subject: str
+    status: EmailDeliveryStatus
+    error_code: str | None
+    error_message: str | None
+    retry_count: int
+    trigger_source: EmailDeliverySource
+    idempotency_key: str | None
+    requested_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class EmailDeliveryAttempt:
+    id: int
+    delivery_id: int
+    attempt_number: int
+    status: Literal["sent", "failed"]
+    error_code: str | None
+    error_message: str | None
+    attempted_at: datetime
+    completed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledDigestRun:
+    id: int
+    business_date: date
+    status: ScheduledDigestRunStatus
+    attempt_count: int
+    report_id: int | None
+    email_delivery_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_code: str | None
+
+
 class RepositoryProtocol(Protocol):
     """Synchronous application repository contract, independent of storage backend."""
 
@@ -104,7 +172,51 @@ class RepositoryProtocol(Protocol):
 
     def save_preferences(self, preferences: UserPreferences) -> UserPreferences: ...
 
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]: ...
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None: ...
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None: ...
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]: ...
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun: ...
+
     def create_session(self, title: str | None = None) -> ChatSession: ...
+
+    def get_session(self, session_id: str) -> ChatSession | None: ...
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]: ...
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession: ...
+
+    def archive_session(self, session_id: str) -> bool: ...
+
+    def restore_session(self, session_id: str) -> bool: ...
+
+    def delete_session(self, session_id: str) -> bool: ...
 
     def append_message(
         self,
@@ -154,3 +266,39 @@ class RepositoryProtocol(Protocol):
     def get_report_sources(self, report_id: int) -> tuple[ReportSource, ...]: ...
 
     def get_source(self, source_id: int) -> ReportSource | None: ...
+
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]: ...
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None: ...
+
+    def list_email_deliveries(self, report_id: int) -> tuple[EmailDeliveryRecord, ...]: ...
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]: ...
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: Literal["sent", "failed"],
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt: ...
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord: ...

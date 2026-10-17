@@ -15,11 +15,20 @@ from ..db.migrations import MIGRATIONS, run_migrations
 from .protocol import (
     ChatMessage,
     ChatSession,
+    EmailDeliveryAttempt,
+    EmailDeliveryRecord,
+    EmailDeliverySource,
+    EmailDeliveryStatus,
     MessageRole,
     ReportRecord,
     ReportReservation,
     ReportSource,
+    ScheduledDigestRun,
+    ScheduledDigestRunStatus,
+    SessionArchivedError,
+    SessionStatus,
     UserPreferences,
+    normalize_daily_send_time,
 )
 
 
@@ -75,7 +84,8 @@ class SQLiteRepository:
         with self._lock:
             row = self._connection_or_raise().execute(
                 """
-                SELECT display_name, email, timezone, topics_json, keywords_json
+                SELECT display_name, email, timezone, topics_json, keywords_json,
+                       daily_send_enabled, daily_send_time
                 FROM user_preferences
                 WHERE id = 1
                 """
@@ -94,7 +104,8 @@ class SQLiteRepository:
                 """
                 UPDATE user_preferences
                 SET display_name = ?, email = ?, timezone = ?,
-                    topics_json = ?, keywords_json = ?, updated_at = ?
+                    topics_json = ?, keywords_json = ?, daily_send_enabled = ?,
+                    daily_send_time = ?, updated_at = ?
                 WHERE id = 1
                 """,
                 (
@@ -103,12 +114,143 @@ class SQLiteRepository:
                     normalized.timezone,
                     topics_json,
                     keywords_json,
+                    int(normalized.daily_send_enabled),
+                    normalized.daily_send_time,
                     now,
                 ),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("user preferences row is missing")
         return normalized
+
+    def create_scheduled_run(
+        self,
+        business_date: date,
+        *,
+        status: ScheduledDigestRunStatus = "pending",
+        error_code: str | None = None,
+    ) -> tuple[ScheduledDigestRun, bool]:
+        _require_date(business_date, "business_date")
+        _validate_scheduled_status(status)
+        now = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            existing = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE business_date = ?",
+                (business_date.isoformat(),),
+            ).fetchone()
+            if existing is not None:
+                return _scheduled_run_from_row(existing), False
+            cursor = self._connection.execute(
+                """
+                INSERT INTO scheduled_digest_runs
+                    (business_date, status, attempt_count, completed_at, error_code,
+                     created_at, updated_at)
+                VALUES (?, ?, 0, ?, ?, ?, ?)
+                """,
+                (
+                    business_date.isoformat(),
+                    status,
+                    now if status in {"failed", "skipped"} else None,
+                    error_code,
+                    now,
+                    now,
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row), True
+
+    def claim_scheduled_run(self, run_id: int) -> ScheduledDigestRun | None:
+        _require_positive_id(run_id, "run_id")
+        now = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE scheduled_digest_runs
+                SET status = 'running', attempt_count = attempt_count + 1,
+                    started_at = ?, completed_at = NULL, updated_at = ?
+                WHERE id = ? AND status = 'pending' AND attempt_count < 3
+                """,
+                (now, now, run_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row)
+
+    def get_scheduled_run(self, business_date: date) -> ScheduledDigestRun | None:
+        _require_date(business_date, "business_date")
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM scheduled_digest_runs WHERE business_date = ?",
+                (business_date.isoformat(),),
+            ).fetchone()
+            return _scheduled_run_from_row(row) if row is not None else None
+
+    def list_scheduled_runs(self, limit: int = 20) -> tuple[ScheduledDigestRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                "SELECT * FROM scheduled_digest_runs ORDER BY business_date DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return tuple(_scheduled_run_from_row(row) for row in rows)
+
+    def update_scheduled_run(
+        self,
+        run_id: int,
+        status: ScheduledDigestRunStatus,
+        *,
+        attempt_count: int | None = None,
+        report_id: int | None = None,
+        email_delivery_id: int | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        error_code: str | None = None,
+    ) -> ScheduledDigestRun:
+        _require_positive_id(run_id, "run_id")
+        _validate_scheduled_status(status)
+        if attempt_count is not None and (isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or not 0 <= attempt_count <= 3):
+            raise ValueError("attempt_count must be between 0 and 3")
+        final_time = completed_at
+        if final_time is None and status in {"succeeded", "failed", "skipped"}:
+            final_time = _utc_now()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE scheduled_digest_runs
+                SET status = ?, attempt_count = COALESCE(?, attempt_count),
+                    report_id = COALESCE(?, report_id),
+                    email_delivery_id = COALESCE(?, email_delivery_id),
+                    started_at = COALESCE(?, started_at),
+                    completed_at = ?, error_code = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    attempt_count,
+                    report_id,
+                    email_delivery_id,
+                    _datetime_text(started_at) if started_at is not None else None,
+                    _datetime_text(final_time) if final_time is not None else None,
+                    error_code,
+                    _utc_now_text(),
+                    run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown scheduled run: {run_id}")
+            row = self._connection.execute(
+                "SELECT * FROM scheduled_digest_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        assert row is not None
+        return _scheduled_run_from_row(row)
 
     def create_session(self, title: str | None = None) -> ChatSession:
         if title is not None and not isinstance(title, str):
@@ -124,8 +266,9 @@ class SQLiteRepository:
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             self._connection.execute(
                 """
-                INSERT INTO chat_sessions (id, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO chat_sessions
+                    (id, title, created_at, updated_at, status, archived_at)
+                VALUES (?, ?, ?, ?, 'active', NULL)
                 """,
                 (
                     session.id,
@@ -135,6 +278,94 @@ class SQLiteRepository:
                 ),
             )
         return session
+
+    def get_session(self, session_id: str) -> ChatSession | None:
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            return _session_from_row(row) if row is not None else None
+
+    def list_sessions(
+        self,
+        status: SessionStatus = "active",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[ChatSession, ...]:
+        _validate_session_listing(status, limit, offset)
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE status = ?
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (status, limit, offset),
+            ).fetchall()
+            return tuple(_session_from_row(row) for row in rows)
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession:
+        normalized_title = _normalize_session_title(title)
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown session: {session_id}")
+            updated_at = _utc_now()
+            self._connection.execute(
+                "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (normalized_title, _datetime_text(updated_at), session_id),
+            )
+            return _session_from_row(
+                self._connection.execute(
+                    "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+            )
+
+    def archive_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                return False
+            archived_at = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE chat_sessions
+                SET status = 'archived', archived_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_datetime_text(archived_at), _datetime_text(archived_at), session_id),
+            )
+            return True
+
+    def restore_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            row = self._connection.execute(
+                "SELECT status FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None or row["status"] != "archived":
+                return False
+            restored_at = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE chat_sessions
+                SET status = 'active', archived_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (_datetime_text(restored_at), session_id),
+            )
+            return True
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                "DELETE FROM chat_sessions WHERE id = ?", (session_id,)
+            )
+            return cursor.rowcount == 1
 
     def append_message(
         self,
@@ -156,11 +387,13 @@ class SQLiteRepository:
         created_at = _utc_now()
         with self._lock, transaction(self._connection_or_raise(), immediate=True):
             session = self._connection.execute(
-                "SELECT id FROM chat_sessions WHERE id = ?",
+                "SELECT id, status, title FROM chat_sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if session is None:
                 raise KeyError(f"unknown session: {session_id}")
+            if session["status"] == "archived":
+                raise SessionArchivedError(f"session is archived: {session_id}")
             cursor = self._connection.execute(
                 """
                 INSERT INTO chat_messages
@@ -175,9 +408,12 @@ class SQLiteRepository:
                     _datetime_text(created_at),
                 ),
             )
+            title = session["title"]
+            if role == "user" and title is None:
+                title = _title_from_user_message(content)
             self._connection.execute(
-                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                (_datetime_text(created_at), session_id),
+                "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (title, _datetime_text(created_at), session_id),
             )
             message_id = int(cursor.lastrowid)
         return ChatMessage(
@@ -468,6 +704,154 @@ class SQLiteRepository:
             ).fetchone()
             return _source_from_row(row) if row is not None else None
 
+    def reserve_email_delivery(
+        self,
+        report_id: int,
+        recipient: str,
+        subject: str,
+        trigger_source: EmailDeliverySource,
+        idempotency_key: str,
+    ) -> tuple[EmailDeliveryRecord, bool]:
+        _require_positive_id(report_id, "report_id")
+        _validate_delivery_fields(recipient, subject, trigger_source, idempotency_key)
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            report = self._connection.execute(
+                "SELECT 1 FROM reports WHERE id = ? AND file_path NOT GLOB ?",
+                (report_id, _PLACEHOLDER_PREFIX + "*"),
+            ).fetchone()
+            if report is None:
+                raise KeyError(f"unknown report: {report_id}")
+            existing = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return _email_delivery_from_row(existing), False
+            now = _utc_now_text()
+            cursor = self._connection.execute(
+                """
+                INSERT INTO email_deliveries
+                    (report_id, recipient, subject, status, error_code, error_message,
+                     retry_count, trigger_source, idempotency_key, requested_at, completed_at)
+                VALUES (?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?, NULL)
+                """,
+                (report_id, recipient, subject, trigger_source, idempotency_key, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_from_row(row), True
+
+    def get_email_delivery(self, delivery_id: int) -> EmailDeliveryRecord | None:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            row = self._connection_or_raise().execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+            return _email_delivery_from_row(row) if row is not None else None
+
+    def list_email_deliveries(
+        self, report_id: int
+    ) -> tuple[EmailDeliveryRecord, ...]:
+        _require_positive_id(report_id, "report_id")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM email_deliveries
+                WHERE report_id = ?
+                ORDER BY requested_at DESC, id DESC
+                """,
+                (report_id,),
+            ).fetchall()
+            return tuple(_email_delivery_from_row(row) for row in rows)
+
+    def list_email_delivery_attempts(
+        self, delivery_id: int
+    ) -> tuple[EmailDeliveryAttempt, ...]:
+        _require_positive_id(delivery_id, "delivery_id")
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT * FROM email_delivery_attempts
+                WHERE delivery_id = ?
+                ORDER BY attempt_number ASC
+                """,
+                (delivery_id,),
+            ).fetchall()
+            return tuple(_email_delivery_attempt_from_row(row) for row in rows)
+
+    def record_email_delivery_attempt(
+        self,
+        delivery_id: int,
+        attempt_number: int,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> EmailDeliveryAttempt:
+        _require_positive_id(delivery_id, "delivery_id")
+        _validate_delivery_attempt(attempt_number, status, error_code, error_message)
+        attempted_at = _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                INSERT INTO email_delivery_attempts
+                    (delivery_id, attempt_number, status, error_code, error_message,
+                     attempted_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delivery_id,
+                    attempt_number,
+                    status,
+                    error_code,
+                    error_message,
+                    attempted_at,
+                    attempted_at,
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM email_delivery_attempts WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_attempt_from_row(row)
+
+    def update_email_delivery(
+        self,
+        delivery_id: int,
+        status: EmailDeliveryStatus,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_count: int | None = None,
+    ) -> EmailDeliveryRecord:
+        _require_positive_id(delivery_id, "delivery_id")
+        if status not in {"pending", "sent", "failed"}:
+            raise ValueError("invalid delivery status")
+        if retry_count is not None and (
+            isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
+        ):
+            raise ValueError("retry_count must be a non-negative integer")
+        completed_at = None if status == "pending" else _utc_now_text()
+        with self._lock, transaction(self._connection_or_raise(), immediate=True):
+            cursor = self._connection.execute(
+                """
+                UPDATE email_deliveries
+                SET status = ?, error_code = ?, error_message = ?,
+                    retry_count = COALESCE(?, retry_count), completed_at = ?
+                WHERE id = ?
+                """,
+                (status, error_code, error_message, retry_count, completed_at, delivery_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown email delivery: {delivery_id}")
+            row = self._connection.execute(
+                "SELECT * FROM email_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+        assert row is not None
+        return _email_delivery_from_row(row)
+
     def _connection_or_raise(self) -> sqlite3.Connection:
         if self._closed:
             raise RuntimeError("repository is closed")
@@ -483,7 +867,14 @@ def _normalize_preferences(value: UserPreferences) -> UserPreferences:
         timezone=value.timezone,
         topics=value.topics,
         keywords=value.keywords,
+        daily_send_enabled=value.daily_send_enabled,
+        daily_send_time=normalize_daily_send_time(value.daily_send_time),
     )
+
+
+def _validate_scheduled_status(status: str) -> None:
+    if status not in {"pending", "running", "succeeded", "failed", "skipped"}:
+        raise ValueError("invalid scheduled run status")
 
 
 def _preferences_from_row(row: sqlite3.Row) -> UserPreferences:
@@ -495,6 +886,39 @@ def _preferences_from_row(row: sqlite3.Row) -> UserPreferences:
         timezone=row["timezone"],
         topics=topics,
         keywords=keywords,
+        daily_send_enabled=bool(row["daily_send_enabled"]),
+        daily_send_time=row["daily_send_time"],
+    )
+
+
+def _scheduled_run_from_row(row: sqlite3.Row) -> ScheduledDigestRun:
+    return ScheduledDigestRun(
+        id=int(row["id"]),
+        business_date=date.fromisoformat(row["business_date"]),
+        status=row["status"],
+        attempt_count=int(row["attempt_count"]),
+        report_id=int(row["report_id"]) if row["report_id"] is not None else None,
+        email_delivery_id=(
+            int(row["email_delivery_id"]) if row["email_delivery_id"] is not None else None
+        ),
+        started_at=_parse_datetime(row["started_at"]) if row["started_at"] else None,
+        completed_at=_parse_datetime(row["completed_at"]) if row["completed_at"] else None,
+        error_code=row["error_code"],
+    )
+
+
+def _session_from_row(row: sqlite3.Row) -> ChatSession:
+    return ChatSession(
+        id=row["id"],
+        title=row["title"],
+        created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+        status=row["status"],
+        archived_at=(
+            _parse_datetime(row["archived_at"])
+            if row["archived_at"] is not None
+            else None
+        ),
     )
 
 
@@ -533,6 +957,70 @@ def _source_from_row(row: sqlite3.Row) -> ReportSource:
         snippet=row["snippet"],
         archive_file_path=row["archive_file_path"],
     )
+
+
+def _email_delivery_from_row(row: sqlite3.Row) -> EmailDeliveryRecord:
+    return EmailDeliveryRecord(
+        id=int(row["id"]),
+        report_id=int(row["report_id"]),
+        recipient=row["recipient"],
+        subject=row["subject"],
+        status=row["status"],
+        error_code=row["error_code"],
+        error_message=row["error_message"],
+        retry_count=int(row["retry_count"]),
+        trigger_source=row["trigger_source"],
+        idempotency_key=row["idempotency_key"],
+        requested_at=_parse_datetime(row["requested_at"]),
+        completed_at=(
+            _parse_datetime(row["completed_at"])
+            if row["completed_at"] is not None
+            else None
+        ),
+    )
+
+
+def _email_delivery_attempt_from_row(row: sqlite3.Row) -> EmailDeliveryAttempt:
+    return EmailDeliveryAttempt(
+        id=int(row["id"]),
+        delivery_id=int(row["delivery_id"]),
+        attempt_number=int(row["attempt_number"]),
+        status=row["status"],
+        error_code=row["error_code"],
+        error_message=row["error_message"],
+        attempted_at=_parse_datetime(row["attempted_at"]),
+        completed_at=_parse_datetime(row["completed_at"]),
+    )
+
+
+def _validate_delivery_fields(
+    recipient: str,
+    subject: str,
+    trigger_source: str,
+    idempotency_key: str,
+) -> None:
+    if not isinstance(recipient, str) or not isinstance(subject, str):
+        raise TypeError("recipient and subject must be strings")
+    if trigger_source not in {"manual_api", "natural_language", "scheduled_task"}:
+        raise ValueError("invalid email delivery source")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("idempotency_key must not be empty")
+
+
+def _validate_delivery_attempt(
+    attempt_number: int,
+    status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
+        raise ValueError("attempt_number must be a positive integer")
+    if status not in {"sent", "failed"}:
+        raise ValueError("invalid email attempt status")
+    if error_code is not None and not isinstance(error_code, str):
+        raise TypeError("error_code must be a string or None")
+    if error_message is not None and not isinstance(error_message, str):
+        raise TypeError("error_message must be a string or None")
 
 
 def _encode_metadata(value: Mapping[str, object] | None) -> str | None:
@@ -611,6 +1099,33 @@ def _load_json_array(value: str, field_name: str) -> list[str]:
     if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
         raise ValueError(f"stored {field_name} must be a JSON string array")
     return decoded
+
+
+def _validate_session_listing(
+    status: SessionStatus,
+    limit: int,
+    offset: int,
+) -> None:
+    if status not in {"active", "archived"}:
+        raise ValueError("status must be active or archived")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+
+
+def _normalize_session_title(title: str) -> str:
+    if not isinstance(title, str):
+        raise TypeError("title must be a string")
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("title must not be empty")
+    return normalized
+
+
+def _title_from_user_message(content: str) -> str | None:
+    normalized = " ".join(content.split())
+    return normalized[:80] or None
 
 
 def _pending_placeholder_path(report_id: int) -> str:

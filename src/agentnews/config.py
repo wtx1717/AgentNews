@@ -26,12 +26,14 @@ class Settings(BaseSettings):
     mcp_search_timeout: float = Field(default=20.0, gt=0)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_use_ssl: bool = False
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None
     app_timezone: str = "Asia/Shanghai"
     report_root: Path = Path("data/reports")
     source_archive_root: Path = Path("data/source_archive")
+    temp_root: Path = Path("data/tmp")
     sqlite_path: Path = Path("data/agentnews.sqlite3")
 
     @field_validator(

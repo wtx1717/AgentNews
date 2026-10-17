@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -110,6 +111,42 @@ def test_chat_settings_health_and_session_context(tmp_path):
     assert "API_KEY" not in health.text
 
 
+def test_chat_exposes_one_digest_tool_call_to_the_model(tmp_path):
+    class DigestRunner:
+        async def ainvoke(self, prompt, *, task_context=None, bash_approval_handler=None, digest_handler=None):
+            assert digest_handler is not None
+            tool_result = await digest_handler("比亚迪", "专利")
+            return AgentRunResult(tool_result, 1, "completed")
+
+    digest = FakeDigestService(
+        DigestResult(
+            report_id=1,
+            report_path="2026-10-16/1-2026-10-16-新闻日报.md",
+            source_archive_paths=(),
+            tool_calls=2,
+            final_text="日报正文",
+        )
+    )
+    repository = InMemoryRepository()
+    client = TestClient(
+        create_app(
+            repository,
+            agent_runner=DigestRunner(),
+            digest_service=digest,
+            settings=_settings(tmp_path),
+        )
+    )
+
+    response = client.post("/api/chat", json={"message": "生成一份比亚迪专利日报"})
+
+    assert response.status_code == 200
+    assert '"report_id":1' in response.json()["answer"]
+    assert len(digest.calls) == 1
+    preferences, _business_date = digest.calls[0]
+    assert preferences.topics == ("比亚迪",)
+    assert preferences.keywords == ("专利",)
+
+
 def test_default_sqlite_application_persists_across_instances(tmp_path):
     settings = _settings(tmp_path)
     first_runner = FakeRunner(AgentRunResult("第一条", 0, "completed"))
@@ -145,19 +182,61 @@ def test_frontend_and_static_assets_are_served_without_secrets_or_browser_storag
     page = client.get("/")
     stylesheet = client.get("/static/app.css")
     script = client.get("/static/app.js")
+    markdown_script = client.get("/static/markdown-render.js")
 
     assert page.status_code == stylesheet.status_code == script.status_code == 200
+    assert markdown_script.status_code == 200
     assert "text/html" in page.headers["content-type"]
     assert "text/css" in stylesheet.headers["content-type"]
     assert "javascript" in script.headers["content-type"]
+    assert "javascript" in markdown_script.headers["content-type"]
     assert '/static/app.css' in page.text
     assert '/static/app.js' in page.text
+    assert '/static/markdown-render.js' in page.text
 
     static_root = Path(api_module.__file__).parent / "static"
     frontend_source = "\n".join(path.read_text(encoding="utf-8") for path in static_root.iterdir())
     lowered_source = frontend_source.lower()
-    for forbidden in ("localstorage", "sessionstorage", "api_key", "smtp", "password", "secret"):
+    for forbidden in ("sessionstorage", "api_key", "smtp", "password", "secret"):
         assert forbidden not in lowered_source
+    # Stored report and source text must never be injected as HTML.
+    assert "innerhtml" not in lowered_source
+    assert "insertadjacenthtml" not in lowered_source
+    assert "currentSessionId" in script.text
+    assert 'id="session-list"' in page.text
+    assert 'id="sessions-archived"' in page.text
+
+
+def test_frontend_layout_keeps_settings_off_the_main_grid(tmp_path):
+    client = TestClient(create_app(settings=_settings(tmp_path), agent_runner=FakeRunner()))
+
+    page = client.get("/")
+    stylesheet = client.get("/static/app.css").text
+
+    # Preferences live in a topbar-triggered drawer, not beside the conversation.
+    assert 'id="settings-dialog"' in page.text
+    assert 'id="open-settings"' in page.text
+    assert 'id="close-settings"' in page.text
+    assert 'aria-controls="settings-dialog"' in page.text
+    assert 'id="preferences-form"' in page.text
+    assert 'class="preferences section-panel"' not in page.text
+    assert ".primary-grid" not in stylesheet
+    assert "min(1280px" not in stylesheet
+    assert "min(1680px" in stylesheet
+
+    # Markdown containers render into elements, not <pre> blocks.
+    assert 'id="detail-markdown" class="markdown-body"' in page.text
+    assert 'id="source-markdown" class="markdown-body"' in page.text
+    assert "height: 286px" not in stylesheet
+    assert ".markdown-body h1" in stylesheet
+    assert ".markdown-body table" in stylesheet
+
+    # Report deletion and the Enter-to-send hint live in the page markup.
+    assert 'id="delete-report"' in page.text
+    assert "Enter 发送" in page.text
+    assert "Shift+Enter 换行" in page.text
+    # The session rail must not disable every control while a run is in flight.
+    assert "querySelectorAll(\".session-control\")" not in client.get("/static/app.js").text
 
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):
@@ -288,7 +367,7 @@ def test_digest_endpoint_uses_saved_timezone_and_returns_report(tmp_path):
     assert response.json()["status"] == "completed"
     assert response.json()["report_id"] == 1
     assert digest.calls[0][0].topics == ("AI",)
-    assert digest.calls[0][1] == date(2026, 10, 15)
+    assert digest.calls[0][1] == datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
 def test_digest_without_reliable_sources_returns_no_results_without_indexing(tmp_path):
@@ -326,3 +405,87 @@ def test_validation_and_missing_session_use_unified_errors(tmp_path):
     )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "session_not_found"
+
+
+def test_session_api_lifecycle_and_message_reading(tmp_path):
+    repository = InMemoryRepository()
+    runner = FakeRunner(AgentRunResult("回答", 1, "completed"))
+    client = TestClient(create_app(repository, agent_runner=runner, settings=_settings(tmp_path)))
+
+    created = client.post("/api/sessions")
+    assert created.status_code == 200
+    session = created.json()
+    assert session["status"] == "active"
+    assert session["title"] is None
+    assert session["archived_at"] is None
+
+    chat = client.post(
+        "/api/chat", json={"session_id": session["id"], "message": "第一条消息"}
+    )
+    assert chat.status_code == 200
+    detail = client.get(f"/api/sessions/{session['id']}")
+    assert detail.status_code == 200
+    assert [message["role"] for message in detail.json()["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert "metadata" not in detail.json()["messages"][0]
+
+    renamed = client.patch(
+        f"/api/sessions/{session['id']}", json={"title": "手动标题"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "手动标题"
+
+    archived = client.post(f"/api/sessions/{session['id']}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert client.get("/api/sessions").json()["items"] == []
+    assert client.get("/api/sessions?status=archived").json()["items"][0]["id"] == session["id"]
+
+    blocked = client.post(
+        "/api/chat", json={"session_id": session["id"], "message": "不应写入"}
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "session_archived"
+    assert len(repository.list_messages(session["id"])) == 2
+    assert client.post(f"/api/sessions/{session['id']}/archive").json()["error"]["code"] == "session_state_conflict"
+
+    restored = client.post(f"/api/sessions/{session['id']}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "active"
+    assert client.post(f"/api/sessions/{session['id']}/restore").json()["error"]["code"] == "session_state_conflict"
+
+    deleted = client.delete(f"/api/sessions/{session['id']}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/sessions/{session['id']}").json()["error"]["code"] == "session_not_found"
+    assert client.delete(f"/api/sessions/{session['id']}").json()["error"]["code"] == "session_not_found"
+
+
+def test_session_api_pagination_validation_and_sqlite_restart(tmp_path):
+    repository = InMemoryRepository()
+    client = TestClient(create_app(repository, agent_runner=FakeRunner(), settings=_settings(tmp_path)))
+    first = client.post("/api/sessions").json()
+    second = client.post("/api/sessions").json()
+    page = client.get("/api/sessions?limit=1&offset=1")
+    assert page.status_code == 200
+    assert page.json()["limit"] == 1
+    assert len(page.json()["items"]) == 1
+    assert page.json()["items"][0]["id"] in {first["id"], second["id"]}
+    assert client.get("/api/sessions?status=unknown").status_code == 422
+    assert client.get("/api/sessions?limit=0").status_code == 422
+    assert client.get("/api/sessions/missing").json()["error"]["code"] == "session_not_found"
+
+    settings = _settings(tmp_path / "sqlite")
+    first_client = TestClient(create_app(settings=settings, agent_runner=FakeRunner()))
+    created = first_client.post("/api/sessions").json()
+    sent = first_client.post(
+        "/api/chat", json={"session_id": created["id"], "message": "跨实例消息"}
+    )
+    assert sent.status_code == 200
+
+    second_app = create_app(settings=settings, agent_runner=FakeRunner())
+    second_client = TestClient(second_app)
+    restarted = second_client.get(f"/api/sessions/{created['id']}")
+    assert restarted.status_code == 200
+    assert restarted.json()["messages"][0]["content"] == "跨实例消息"

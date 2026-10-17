@@ -16,6 +16,8 @@ from .repositories import (
     ReportReservation,
     ReportSource,
     RepositoryProtocol,
+    SessionArchivedError,
+    SessionStatus,
     SQLiteRepository,
     UserPreferences,
 )
@@ -30,8 +32,15 @@ from .services.digest import (
     DigestService,
     DigestStorageError,
 )
-from .services.chat import ChatAgentError, ChatResult, ChatService, ChatSessionNotFoundError
+from .services.chat import (
+    ChatAgentError,
+    ChatResult,
+    ChatService,
+    ChatSessionArchivedError,
+    ChatSessionNotFoundError,
+)
 from .services.report import ReportDeletionError, ReportService
+from .services.bash import BashAudit, BashService, ChatRunBusyError, ChatRunManager
 from .api import app, create_app
 
 __all__ = [
@@ -48,6 +57,8 @@ __all__ = [
     "ReportSource",
     "ReportStorage",
     "RepositoryProtocol",
+    "SessionArchivedError",
+    "SessionStatus",
     "SQLiteRepository",
     "Settings",
     "StoredReport",
@@ -68,9 +79,14 @@ __all__ = [
     "ChatAgentError",
     "ChatResult",
     "ChatService",
+    "ChatSessionArchivedError",
     "ChatSessionNotFoundError",
     "ReportDeletionError",
     "ReportService",
+    "BashAudit",
+    "BashService",
+    "ChatRunBusyError",
+    "ChatRunManager",
     "app",
     "create_app",
 ]
