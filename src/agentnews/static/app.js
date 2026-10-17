@@ -720,6 +720,7 @@ function handleChatKeydown(event) {
   if (typeof elements.chatForm.requestSubmit === "function") elements.chatForm.requestSubmit();
   else elements.chatForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
+
 async function sendChat(event) {
   event.preventDefault();
   const message = elements.chatInput.value.trim();

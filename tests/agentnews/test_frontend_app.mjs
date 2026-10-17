@@ -755,8 +755,6 @@ test("stored content is never injected as markup", async () => {
 // ---------------------------------------------------------------------------
 // Keyboard: Enter sends, Shift+Enter and IME composition do not
 // ---------------------------------------------------------------------------
-// Keyboard: Enter sends, Shift+Enter and IME composition do not
-// ---------------------------------------------------------------------------
 
 test("Enter sends the message and Shift+Enter does not", async () => {
   const harness = await startApp({
@@ -818,7 +816,122 @@ test("blank input is not sent by Enter", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Concurrency: one run per session, the rest of the workspace stays usable
+// ---------------------------------------------------------------------------
 
+const APPROVAL = {
+  id: "a1",
+  command: "Write-Output 'ok'",
+  explanation: "读取一条测试输出",
+  risk_summary: "仅执行只读命令",
+  working_directory: "D:\\workspace",
+  timeout_seconds: 60,
+  output_limit_bytes: 1048576,
+};
+
+function secondSessionResponses() {
+  return {
+    "GET /api/sessions": {
+      __body: {
+        items: [SESSION, { id: "s2", title: "第二个会话", status: "active", updated_at: SESSION.updated_at }],
+        limit: 100,
+        offset: 0,
+      },
+    },
+    "GET /api/sessions/s2": {
+      __body: { id: "s2", title: "第二个会话", status: "active", messages: [] },
+    },
+  };
+}
+
+test("a running session does not lock the session list", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      ...secondSessionResponses(),
+      "POST /api/chat": {
+        status: 202,
+        __body: { run_id: "r1", session_id: "s1", status: "pending_approval", approval: APPROVAL },
+      },
+      "POST /api/sessions": { __body: { id: "s3", title: "新会话", status: "active" } },
+      "GET /api/sessions/s3": { __body: { id: "s3", title: "新会话", status: "active", messages: [] } },
+    },
+  });
+  try {
+    const { document } = harness;
+    document.querySelector("#chat-input").value = "执行测试命令";
+    document.querySelector("#chat-form").dispatch("submit");
+    await settle();
+
+    // The run is in flight: the rail is fully usable.
+    assert.equal(document.querySelector("#new-session").disabled, false);
+    assert.equal(document.querySelector("#sessions-archived").disabled, false);
+    assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, true);
+    assert.equal(document.querySelector("#chat-input").disabled, false);
+
+    // Switching to another session loads its own conversation.
+    document.querySelectorAll(".session-item")[1].querySelector(".session-select").click();
+    await settle();
+    assert.equal(document.querySelector("#chat-session-label").textContent, "第二个会话");
+    assert.equal(document.querySelector("#chat-form button[type=submit]").disabled, false);
+
+    // The other session is not run-locked, so it can send its own message.
+    document.querySelector("#chat-input").value = "另一条消息";
+    document.querySelector("#chat-form").dispatch("submit");
+    await settle();
+    assert.equal(harness.callsFor("/api/chat").length, 2, "the second session may run in parallel");
+    assert.equal(
+      harness.callsFor("/api/chat").some((call) => JSON.parse(call.body).session_id === "s2"),
+      true,
+    );
+  } finally {
+    harness.restore();
+  }
+});
+
+test("a finished background run does not overwrite the visible conversation", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      ...secondSessionResponses(),
+      "POST /api/chat": {
+        status: 202,
+        __body: { run_id: "r1", session_id: "s1", status: "pending_approval", approval: APPROVAL },
+      },
+      "GET /api/chat/runs/r1": {
+        __body: {
+          run_id: "r1",
+          session_id: "s1",
+          status: "completed",
+          result: { session_id: "s1", answer: "已执行", tool_calls: 4, report_ids: [] },
+        },
+      },
+    },
+  });
+  try {
+    const { document } = harness;
+    document.querySelector("#chat-input").value = "执行测试命令";
+    document.querySelector("#chat-form").dispatch("submit");
+    await settle();
+
+    document.querySelectorAll(".session-item")[1].querySelector(".session-select").click();
+    await settle();
+    const before = document.querySelector("#chat-session-label").textContent;
+
+    // Let the poller settle session s1's run while s2 is on screen.
+    harness.timers.forEach((timer) => timer());
+    await settle();
+    assert.equal(document.querySelector("#chat-session-label").textContent, before);
+    assert.notEqual(document.querySelector("#chat-status").textContent, "完成 · 4 次工具调用");
+    assert.equal(
+      harness.callsFor("/api/sessions/s1").length,
+      1,
+      "a background run must not reload the visible session",
+    );
+  } finally {
+    harness.restore();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Report deletion

@@ -235,6 +235,8 @@ def test_frontend_layout_keeps_settings_off_the_main_grid(tmp_path):
     assert 'id="delete-report"' in page.text
     assert "Enter 发送" in page.text
     assert "Shift+Enter 换行" in page.text
+    # The session rail must not disable every control while a run is in flight.
+    assert "querySelectorAll(\".session-control\")" not in client.get("/static/app.js").text
 
 
 def test_chat_errors_are_safe_and_messages_are_saved(tmp_path):
