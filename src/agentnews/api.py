@@ -85,6 +85,8 @@ class ChatRequest(_StrictModel):
 
     session_id: str | None = None
     message: str = Field(min_length=1)
+    # 流式调用立即返回运行快照，由前端轮询增量文本；默认保持原有同步语义。
+    stream: bool = Field(default=False, strict=True)
 
     @field_validator("session_id", "message")
     @classmethod
@@ -363,7 +365,11 @@ def create_app(
     @app.post("/api/chat")
     async def chat(payload: ChatRequest) -> Response:
         try:
-            run = await chat_run_manager.start(payload.message, payload.session_id)
+            run = await chat_run_manager.start(
+                payload.message,
+                payload.session_id,
+                wait_for_first_event=not payload.stream,
+            )
         except ChatSessionNotFoundError as error:
             raise ApiError(404, "session_not_found", str(error)) from None
         except ChatSessionArchivedError as error:
@@ -380,6 +386,9 @@ def create_app(
             raise ApiError(422, "validation_error", "请求参数无效") from None
         snapshot = chat_run_manager.snapshot(run.id)
         assert snapshot is not None
+        if payload.stream:
+            # 流式模式不等待终态：运行继续在后台执行，前端用 run_id 轮询增量文本。
+            return JSONResponse(status_code=202, content=snapshot)
         if run.status == "pending_approval":
             return JSONResponse(status_code=202, content=snapshot)
         if run.status == "completed":

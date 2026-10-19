@@ -711,6 +711,89 @@ test("a running conversation shows elapsed time and keeps the final duration", a
   }
 });
 
+test("a streamed reply appears incrementally and is replaced by the final message", async () => {
+  let polls = 0;
+  const streamedSession = {
+    ...SESSION,
+    messages: [
+      { role: "user", content: "执行一个耗时任务" },
+      { role: "assistant", content: "第一段，第二段" },
+    ],
+  };
+  const result = {
+    session_id: "s1",
+    answer: "第一段，第二段",
+    tool_calls: 1,
+    report_ids: [],
+  };
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      "POST /api/chat": {
+        status: 202,
+        __body: {
+          run_id: "r1",
+          session_id: "s1",
+          status: "running",
+          elapsed_ms: 300,
+          stream_text: "第一段",
+        },
+      },
+      "GET /api/chat/runs/r1": () => {
+        polls += 1;
+        if (polls === 1) {
+          return {
+            __body: {
+              run_id: "r1",
+              session_id: "s1",
+              status: "running",
+              elapsed_ms: 900,
+              stream_text: "第一段，第二段",
+            },
+          };
+        }
+        return {
+          __body: {
+            run_id: "r1",
+            session_id: "s1",
+            status: "completed",
+            elapsed_ms: 1200,
+            stream_text: "第一段，第二段",
+            result,
+          },
+        };
+      },
+      "GET /api/sessions/s1": { __body: streamedSession },
+    },
+  });
+  try {
+    const { document } = harness;
+    document.querySelector("#chat-input").value = "执行一个耗时任务";
+    document.querySelector("#chat-form").dispatch("submit");
+    await settle();
+    assert.equal(harness.callsFor("/api/chat")[0].body.includes('"stream":true'), true);
+    let streaming = document.querySelector(".message-streaming");
+    assert.ok(streaming, "expected a live assistant bubble");
+    assert.ok(collectText(streaming).includes("第一段"));
+
+    harness.timers.forEach((handler) => handler());
+    await settle();
+    streaming = document.querySelector(".message-streaming");
+    assert.ok(streaming);
+    assert.ok(collectText(streaming).includes("第一段，第二段"));
+
+    harness.timers.forEach((handler) => handler());
+    await settle();
+    assert.equal(document.querySelector(".message-streaming"), null);
+    const replies = document.querySelectorAll(".message-assistant .message-body");
+    assert.equal(replies.length, 1);
+    assert.ok(collectText(replies[0]).includes("第一段，第二段"));
+    assert.equal(document.querySelector("#chat-status").textContent, "完成 · 1 次工具调用");
+  } finally {
+    harness.restore();
+  }
+});
+
 test("an agent error reply is surfaced without leaking internals", async () => {
   const harness = await startApp({
     storedSession: "s1",

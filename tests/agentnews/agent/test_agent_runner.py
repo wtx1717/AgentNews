@@ -5,7 +5,13 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from agentnews.agent import AgentRunner, get_prompt
 from agentnews.config import Settings
@@ -34,6 +40,24 @@ class FakeModel:
         return self.responses.pop(0)
 
 
+class StreamingFakeModel:
+    """每次 astream 依次产出一组预置分片，用于验证流式聚合。"""
+
+    def __init__(self, turns):
+        self.turns = [list(turn) for turn in turns]
+        self.messages = []
+        self.tools = None
+
+    def bind_tools(self, tools):
+        self.tools = list(tools)
+        return self
+
+    async def astream(self, messages):
+        self.messages.append(list(messages))
+        for chunk in self.turns.pop(0):
+            yield chunk
+
+
 def _tool_call(name, args, call_id):
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
@@ -58,6 +82,83 @@ def test_direct_answer_does_not_initialize_search(monkeypatch):
     assert {tool.name for tool in model.tools} == {
         "web_search", "list_dir", "read_file", "search_content", "write_file"
     }
+
+
+def test_streams_final_answer_tokens():
+    model = StreamingFakeModel(
+        [[AIMessageChunk(content="你"), AIMessageChunk(content="好")]]
+    )
+    tokens = []
+
+    async def on_token(text: str) -> None:
+        tokens.append(text)
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke("hi", on_token=on_token)
+    )
+
+    assert result.text == "你好"
+    assert tokens == ["你", "好"]
+
+
+def test_streaming_falls_back_for_models_without_astream():
+    model = FakeModel([AIMessage(content="完整回答")])
+    tokens = []
+
+    async def on_token(text: str) -> None:
+        tokens.append(text)
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke("hi", on_token=on_token)
+    )
+
+    assert result.text == "完整回答"
+    assert tokens == ["完整回答"]
+
+
+def test_streaming_resets_partial_text_before_tool_calls():
+    model = StreamingFakeModel(
+        [
+            [
+                AIMessageChunk(content="我先查一下"),
+                AIMessageChunk(
+                    content="",
+                    tool_calls=[
+                        _tool_call(
+                            "generate_digest",
+                            {"topic": "AI", "keyword": "Agent"},
+                            "digest-1",
+                        )
+                    ],
+                ),
+            ],
+            [AIMessageChunk(content="日报已生成")],
+        ]
+    )
+    tokens = []
+    resets = []
+
+    async def on_token(text: str) -> None:
+        tokens.append(text)
+
+    async def on_reset() -> None:
+        resets.append(True)
+
+    async def digest_handler(topic: str, keyword: str) -> str:
+        return '{"ok":true}'
+
+    result = asyncio.run(
+        AgentRunner(model, settings=_settings()).ainvoke(
+            "生成日报",
+            on_token=on_token,
+            on_reset=on_reset,
+            digest_handler=digest_handler,
+        )
+    )
+
+    assert result.text == "日报已生成"
+    assert tokens == ["我先查一下", "日报已生成"]
+    assert resets == [True]
 
 
 def test_bash_is_registered_only_with_approval_handler():

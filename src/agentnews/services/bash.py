@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import hashlib
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -393,6 +394,7 @@ class _RunRecord:
     approval: BashApproval | None = None
     approval_future: asyncio.Future[str] | None = None
     error_code: str | None = None
+    stream_text: str = ""
 
     def elapsed_ms(self) -> int:
         """返回本轮已运行毫秒数；进入终态后冻结，避免轮询继续累加。"""
@@ -428,8 +430,18 @@ class ChatRunManager:
         self._runs: dict[str, _RunRecord] = {}
         self._active_by_session: dict[str, str] = {}
 
-    async def start(self, message: str, session_id: str | None = None) -> _RunRecord:
-        """登记并启动一次会话运行，返回可轮询状态的运行记录。"""
+    async def start(
+        self,
+        message: str,
+        session_id: str | None = None,
+        *,
+        wait_for_first_event: bool = True,
+    ) -> _RunRecord:
+        """登记并启动一次会话运行，返回可轮询状态的运行记录。
+
+        默认等待运行进入首个状态（审核或结束），兼容原有同步调用方；
+        流式调用可传 ``wait_for_first_event=False`` 立即拿到运行 ID。
+        """
         if session_id is None:
             session_id = self.repository.create_session().id
         session = self.repository.get_session(session_id)
@@ -449,12 +461,23 @@ class ChatRunManager:
         self._runs[record.id] = record
         self._active_by_session[session_id] = record.id
         record.task = asyncio.create_task(self._run(record, message))
-        await record.changed.wait()
+        if wait_for_first_event:
+            await record.changed.wait()
+        else:
+            # 让后台任务先跑过消息落库等同步阶段，前端紧接着读取会话时不会少消息。
+            await asyncio.sleep(0)
         return record
 
     async def _run(self, record: _RunRecord, message: str) -> None:
         async def bash_handler(command: str, explanation: str) -> str:
             return await self._request_approval(record, command, explanation)
+
+        async def on_token(text: str) -> None:
+            record.stream_text += text
+
+        async def on_reset() -> None:
+            # 模型转入工具调用时，之前流出的正文不是最终答案。
+            record.stream_text = ""
 
         try:
             run_kwargs: dict[str, Any] = {
@@ -465,6 +488,10 @@ class ChatRunManager:
                 run_kwargs["digest_handler"] = self.digest_handler
             if self.email_handler is not None:
                 run_kwargs["email_handler"] = self.email_handler
+            if _accepts_keyword(self.chat_service.run, "on_token"):
+                run_kwargs["on_token"] = on_token
+                if _accepts_keyword(self.chat_service.run, "on_reset"):
+                    run_kwargs["on_reset"] = on_reset
             record.result = await self.chat_service.run(
                 message,
                 record.session_id,
@@ -593,6 +620,7 @@ class ChatRunManager:
             "status": record.status,
             "started_at": record.started_at.isoformat(),
             "elapsed_ms": record.elapsed_ms(),
+            "stream_text": record.stream_text,
         }
         if record.approval is not None and record.status == "pending_approval":
             payload["approval"] = record.approval.to_dict(
@@ -707,6 +735,18 @@ def _redact(value: str) -> str:
         r"(?i)((?:api[_-]?key|token|password|passwd|secret)\s*(?:=|:)\s*)([^\s;]+)",
         r"\1[REDACTED]",
         value,
+    )
+
+
+def _accepts_keyword(function: Any, name: str) -> bool:
+    """判断可调用对象是否接受指定关键字参数，兼容不同的服务实现。"""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+        for parameter in parameters
     )
 
 

@@ -164,6 +164,10 @@ h4 { margin: 0; font-size: 13px; }
 }
 .message-body.markdown-body > :first-child { margin-top: 0; }
 .message-body.markdown-body > :last-child { margin-bottom: 0; }
+/* 流式回复：正文尾部显示光标，空文本时显示等待提示。 */
+.message-stream-placeholder { color: var(--muted); font-size: 13px; }
+.message-streaming .message-body::after { content: "▍"; margin-left: 2px; color: #3b9b68; animation: caret-blink 1s steps(1) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
 .message-body.markdown-body p { margin: 0 0 8px; }
 .message-body.markdown-body h1 { margin: 0 0 8px; padding: 0; border: 0; font-size: 17px; line-height: 1.45; }
 .message-body.markdown-body h2 { margin: 12px 0 6px; padding: 0; border: 0; font-size: 15px; line-height: 1.45; }

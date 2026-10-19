@@ -18,8 +18,13 @@ const state = {
   pendingApprovalId: null,
   runPoller: null,
   runTicker: null,
+  runPollInFlight: false,
   // 还没有会话 ID 时（首次发送）也要有计时起点。
   sendStartedAt: null,
+  // 当前会话的流式回复气泡，避免每轮重新查找 DOM。
+  streamArticle: null,
+  streamBody: null,
+  streamText: null,
   reportOffset: 0,
   reportLimit: 10,
   reportRequest: 0,
@@ -256,11 +261,13 @@ function markSessionRun(sessionId, runId, elapsedMs = null) {
     status: "running",
     approval: null,
     startedAtMs,
+    streamText: "",
   });
   state.runDurations.delete(sessionId);
   updateSessionRunIndicators();
   updateChatAvailability();
   syncRunTicker();
+  renderRunStream();
 }
 
 function clearSessionRun(sessionId) {
@@ -273,6 +280,7 @@ function clearSessionRun(sessionId) {
   updateChatAvailability();
   if (state.activeRuns.size === 0) stopRunPolling();
   syncRunTicker();
+  renderRunStream();
 }
 
 function updateSessionRunIndicators() {
@@ -300,6 +308,7 @@ function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {})
   if (run) {
     run.status = snapshot.status;
     run.approval = snapshot.approval || null;
+    if (typeof snapshot.stream_text === "string") run.streamText = snapshot.stream_text;
     // 以后端单调计时为准校正本地起点，避免页面计时漂移。
     if (Number.isFinite(snapshot.elapsed_ms)) {
       run.startedAtMs = Date.now() - Math.max(0, snapshot.elapsed_ms);
@@ -317,7 +326,10 @@ function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {})
     renderBashApproval(snapshot.approval);
   }
   updateSessionRunIndicators();
-  if (state.sessionId === sessionId) renderRunTimer();
+  if (state.sessionId === sessionId) {
+    renderRunTimer();
+    renderRunStream();
+  }
 }
 
 async function finishChatRun(sessionId, snapshot) {
@@ -333,8 +345,11 @@ async function finishChatRun(sessionId, snapshot) {
   clearSessionRun(sessionId);
   const result = snapshot.result || {};
   if (snapshot.status === "completed") {
-    if (isCurrent()) {
+    // 首次发送由后端创建会话时，本轮结束后自动切入该会话。
+    if (sessionId && (state.sessionId === sessionId || !state.sessionId)) {
       await loadSessionDetail(sessionId);
+    }
+    if (isCurrent()) {
       elements.toolCalls.textContent = String(result.tool_calls ?? 0);
       setStatus(elements.chatStatus, "completed", `完成 · ${result.tool_calls ?? 0} 次工具调用`);
     }
@@ -366,27 +381,35 @@ async function handleChatRunSnapshot(sessionId, snapshot) {
 
 // 后端运行是异步的，这里定时拉取每个进行中会话的快照，直到它们进入终态。
 async function pollChatRuns() {
-  if (state.activeRuns.size === 0) {
-    stopRunPolling();
-    return;
-  }
-  for (const [sessionId, run] of [...state.activeRuns]) {
-    try {
-      const snapshot = await request(`/api/chat/runs/${encodeURIComponent(run.runId)}`);
-      await handleChatRunSnapshot(sessionId, snapshot);
-    } catch (error) {
-      clearSessionRun(sessionId);
-      if (state.sessionId === sessionId) {
-        setStatus(elements.chatStatus, "failed");
-        setError(elements.chatError, error.message);
+  // 150ms 轮询下避免上一轮请求尚未返回时叠加新请求，防止流式文本回退。
+  if (state.runPollInFlight) return;
+  state.runPollInFlight = true;
+  try {
+    if (state.activeRuns.size === 0) {
+      stopRunPolling();
+      return;
+    }
+    for (const [sessionId, run] of [...state.activeRuns]) {
+      try {
+        const snapshot = await request(`/api/chat/runs/${encodeURIComponent(run.runId)}`);
+        await handleChatRunSnapshot(sessionId, snapshot);
+      } catch (error) {
+        clearSessionRun(sessionId);
+        if (state.sessionId === sessionId) {
+          setStatus(elements.chatStatus, "failed");
+          setError(elements.chatError, error.message);
+        }
       }
     }
+  } finally {
+    state.runPollInFlight = false;
   }
 }
 
 function startRunPolling() {
   if (state.runPoller !== null) return;
-  state.runPoller = window.setInterval(pollChatRuns, 600);
+  // 150ms 的增量轮询让回复按小段持续出现，同时保留现有快照协议。
+  state.runPoller = window.setInterval(pollChatRuns, 150);
 }
 
 async function submitBashApproval(decision) {
@@ -565,17 +588,87 @@ function appendMessage(role, text) {
   elements.chatMessages.append(article);
 }
 
+function scrollChatToBottomIfFollower() {
+  const container = elements.chatMessages;
+  const distance = container.scrollHeight - container.scrollTop - (container.clientHeight || 0);
+  // 用户向上翻看历史时不强行拉回底部。
+  if (!Number.isFinite(distance) || distance < 120) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function clearStreamBubble() {
+  if (state.streamArticle) state.streamArticle.remove();
+  state.streamArticle = null;
+  state.streamBody = null;
+  state.streamText = null;
+}
+
+// 流式回复占用一个临时助手气泡；结束后由持久化消息替换。
+function ensureStreamBubble() {
+  if (state.streamArticle && state.streamArticle.parentNode === elements.chatMessages) {
+    return state.streamArticle;
+  }
+  state.streamArticle = null;
+  state.streamBody = null;
+  state.streamText = null;
+  const empty = elements.chatMessages.querySelector(".chat-empty");
+  if (empty) empty.remove();
+  const article = document.createElement("article");
+  article.className = "message message-assistant message-streaming";
+  article.setAttribute("aria-busy", "true");
+  // 增量刷新不逐字播报，最终消息落库后再由消息区统一播报。
+  article.setAttribute("aria-live", "off");
+  const label = document.createElement("p");
+  label.className = "message-role";
+  label.textContent = "助手";
+  const body = document.createElement("div");
+  body.className = "message-body message-stream-placeholder";
+  body.textContent = "正在思考…";
+  article.append(label, body);
+  elements.chatMessages.append(article);
+  state.streamArticle = article;
+  state.streamBody = body;
+  state.streamText = "";
+  scrollChatToBottomIfFollower();
+  return article;
+}
+
+// 用快照里的增量文本刷新当前会话的流式气泡。
+function renderRunStream() {
+  const run = runForSession(state.sessionId);
+  if (!run || !RUN_TIMER_STATUSES.has(run.status)) {
+    clearStreamBubble();
+    return;
+  }
+  const text = typeof run.streamText === "string" ? run.streamText : "";
+  ensureStreamBubble();
+  if (text === state.streamText) return;
+  state.streamText = text;
+  if (text) {
+    state.streamBody.className = "message-body markdown-body";
+    renderMarkdown(state.streamBody, text);
+  } else {
+    state.streamBody.className = "message-body message-stream-placeholder";
+    state.streamBody.textContent = "正在思考…";
+  }
+  scrollChatToBottomIfFollower();
+}
+
 function renderMessages(messages) {
+  clearStreamBubble();
   elements.chatMessages.replaceChildren();
   if (!messages?.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state chat-empty";
     empty.textContent = "开始一段新对话";
     elements.chatMessages.append(empty);
+    renderRunStream();
     return;
   }
   for (const message of messages) appendMessage(message.role, message.content);
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+  renderRunStream();
 }
 
 function updateChatAvailability() {
@@ -624,6 +717,7 @@ function clearCurrentSession() {
   setError(elements.chatError, "");
   updateChatAvailability();
   renderRunTimer();
+  renderRunStream();
 }
 
 function setCurrentSession(session) {
@@ -642,6 +736,7 @@ function setCurrentSession(session) {
     item.setAttribute("aria-current", String(item.dataset.sessionId === state.sessionId));
   }
   renderRunTimer();
+  renderRunStream();
 }
 
 function setSessionView(status) {
@@ -891,12 +986,11 @@ async function sendChat(event) {
   try {
     const result = await request("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ session_id: requestSessionId, message }),
+      body: JSON.stringify({ session_id: requestSessionId, message, stream: true }),
     });
-    // The reply is either a finished run's result or a run that is still going;
-    // the session for a new run comes back in `session_id`, not in the result.
-    if (result.status === "pending_approval" || result.status === "running") {
-      const runSessionId = result.session_id || requestSessionId;
+    // 流式模式返回运行快照；兼容非流式 API 直接返回的最终结果。
+    const runSessionId = result.session_id || requestSessionId;
+    if (result.run_id && (result.status === "pending_approval" || result.status === "running")) {
       markSessionRun(runSessionId, result.run_id, result.elapsed_ms);
       if (!state.sessionId && runSessionId) {
         // 新会话由后端创建；切到该会话才能看到本轮计时与消息。
@@ -904,8 +998,13 @@ async function sendChat(event) {
       }
       applySnapshotToSession(runSessionId, result);
       syncRunPolling();
+    } else if (result.run_id) {
+      // 运行可能在首个快照前就结束，仍按终态处理。
+      state.sendStartedAt = null;
+      await finishChatRun(runSessionId, result);
+      return;
     } else {
-      const finishedSessionId = result.session_id || requestSessionId;
+      const finishedSessionId = runSessionId;
       const elapsed = state.sendStartedAt !== null ? Date.now() - state.sendStartedAt : null;
       state.sendStartedAt = null;
       await finishChatRun(finishedSessionId, {

@@ -294,6 +294,47 @@ def test_run_snapshot_reports_a_frozen_elapsed_time(tmp_path):
     assert second["elapsed_ms"] == first["elapsed_ms"]
 
 
+def test_run_snapshot_exposes_partial_stream_text(tmp_path):
+    repository, bash_service, _report_storage, _source_storage = _services(tmp_path)
+
+    class StreamingChatService:
+        async def run(
+            self,
+            message,
+            session_id,
+            *,
+            bash_approval_handler,
+            run_id,
+            on_token=None,
+            on_reset=None,
+        ):
+            await on_token("第一段")
+            await release.wait()
+            await on_token("，第二段")
+            return ChatResult(session_id, "第一段，第二段", 0)
+
+    manager = ChatRunManager(repository, StreamingChatService(), bash_service)
+
+    async def scenario():
+        record = await manager.start("流式", wait_for_first_event=False)
+        for _ in range(100):
+            partial = manager.snapshot(record.id)
+            if partial["stream_text"] == "第一段":
+                break
+            await asyncio.sleep(0.001)
+        release.set()
+        await asyncio.wait_for(record.task, timeout=1)
+        return partial, manager.snapshot(record.id)
+
+    release = asyncio.Event()
+    partial, final = asyncio.run(scenario())
+
+    assert partial["status"] == "running"
+    assert partial["stream_text"] == "第一段"
+    assert final["result"]["answer"] == "第一段，第二段"
+    assert final["stream_text"] == "第一段，第二段"
+
+
 def test_execute_returns_an_error_object_when_the_process_fails(tmp_path):
     _repository, service, _report_storage, _source_storage = _services(tmp_path)
 

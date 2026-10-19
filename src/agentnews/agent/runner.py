@@ -97,12 +97,16 @@ class AgentRunner:
         bash_approval_handler: Callable[[str, str], Awaitable[str]] | None = None,
         digest_handler: Callable[[str, str], Awaitable[str]] | None = None,
         email_handler: Callable[[int | None, bool], Awaitable[str]] | None = None,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+        on_reset: Callable[[], Awaitable[None]] | None = None,
     ) -> AgentRunResult:
         """Execute one prompt and its model-selected tools asynchronously.
 
         ``prompt`` remains the user request. ``system_prompt`` and
         ``task_context`` are separate model messages so task-specific data is
-        never silently mixed into an ordinary user request.
+        never silently mixed into an ordinary user request. ``on_token``
+        receives incremental answer text; ``on_reset`` retracts partial text
+        when the model switches from answering to calling tools.
         """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must not be empty")
@@ -229,7 +233,12 @@ class AgentRunner:
             tool_call_records: list[ToolCallRecord] = []
             while True:
                 try:
-                    response = await bound_model.ainvoke(messages)
+                    response = await _model_turn(
+                        bound_model,
+                        messages,
+                        on_token=on_token,
+                        on_reset=on_reset,
+                    )
                 except Exception as error:
                     # 统一包装成脱敏异常，避免原始错误带出请求内容。
                     raise map_deepseek_error(error) from None
@@ -336,6 +345,44 @@ def create_agent_runner(
         search_client_factory=search_client_factory,
         bash_approval_handler=bash_approval_handler,
     )
+
+
+async def _model_turn(
+    bound_model: Any,
+    messages: list[Any],
+    *,
+    on_token: Callable[[str], Awaitable[None]] | None,
+    on_reset: Callable[[], Awaitable[None]] | None,
+) -> Any:
+    """执行一次模型调用；提供回调时流式转发正文并聚合完整响应。"""
+    if on_token is None:
+        return await bound_model.ainvoke(messages)
+
+    stream = getattr(bound_model, "astream", None)
+    if not callable(stream):
+        # 兼容只实现 ainvoke 的自定义模型：一次性回放完整正文。
+        response = await bound_model.ainvoke(messages)
+        if not _tool_calls(response):
+            text = _message_text(response)
+            if text:
+                await on_token(text)
+        return response
+
+    response: Any | None = None
+    emitted = False
+    async for chunk in stream(messages):
+        response = chunk if response is None else response + chunk
+        text = _message_text(chunk)
+        if text:
+            emitted = True
+            await on_token(text)
+    if response is None:
+        # 空流属于异常实现，退回普通调用，避免返回 None 破坏工具循环。
+        return await bound_model.ainvoke(messages)
+    if emitted and _tool_calls(response) and on_reset is not None:
+        # 模型先输出正文又选择调用工具时，当前正文不是最终回答，通知前端撤回。
+        await on_reset()
+    return response
 
 
 async def _invoke_tool(tool_map: Mapping[str, Any], name: Any, arguments: Any) -> str:

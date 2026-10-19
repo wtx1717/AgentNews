@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 import inspect
 import json
@@ -67,6 +67,8 @@ class ChatService:
         digest_handler: Callable[[str, str], Any] | None = None,
         email_handler: Callable[[int | None, bool], Any] | None = None,
         run_id: str | None = None,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+        on_reset: Callable[[], Awaitable[None]] | None = None,
     ) -> ChatResult:
         """处理一轮对话：校验输入、载入历史、调用 Agent 并保存问答。"""
         if not isinstance(message, str) or not message.strip():
@@ -109,6 +111,10 @@ class ChatService:
                 runner.ainvoke, "email_handler"
             ):
                 invoke_kwargs["email_handler"] = email_handler
+            if on_token is not None and _accepts_keyword(runner.ainvoke, "on_token"):
+                invoke_kwargs["on_token"] = on_token
+                if on_reset is not None and _accepts_keyword(runner.ainvoke, "on_reset"):
+                    invoke_kwargs["on_reset"] = on_reset
             run = await runner.ainvoke(normalized_message, **invoke_kwargs)
             if not isinstance(run, AgentRunResult):
                 raise TypeError("invalid agent result")

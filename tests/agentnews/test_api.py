@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 from pathlib import Path
+import threading
+import time
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
@@ -109,6 +112,52 @@ def test_chat_settings_health_and_session_context(tmp_path):
     assert health.status_code == 200
     assert health.json()["dependencies"]["agent"] == "unconfigured"
     assert "API_KEY" not in health.text
+
+
+def test_streaming_chat_returns_a_run_and_exposes_partial_text(tmp_path):
+    class StreamingRunner:
+        def __init__(self):
+            self.release = threading.Event()
+
+        async def ainvoke(self, prompt, *, task_context=None, on_token=None, on_reset=None):
+            await on_token("第一段")
+            # 不阻塞事件循环，等待测试观察到中间态后再继续输出。
+            for _ in range(1000):
+                if self.release.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            await on_token("，第二段")
+            return AgentRunResult("第一段，第二段", 0, "completed")
+
+    runner = StreamingRunner()
+    with TestClient(
+        create_app(InMemoryRepository(), agent_runner=runner, settings=_settings(tmp_path))
+    ) as client:
+        started = client.post("/api/chat", json={"message": "流式回答", "stream": True})
+
+        assert started.status_code == 202
+        snapshot = started.json()
+        run_id = snapshot["run_id"]
+        assert snapshot["status"] == "running"
+        assert "stream_text" in snapshot
+
+        current = snapshot
+        for _ in range(200):
+            current = client.get(f"/api/chat/runs/{run_id}").json()
+            if current["stream_text"] == "第一段":
+                break
+            time.sleep(0.005)
+        assert current["status"] == "running"
+        assert current["stream_text"] == "第一段"
+
+        runner.release.set()
+        for _ in range(200):
+            current = client.get(f"/api/chat/runs/{run_id}").json()
+            if current["status"] == "completed":
+                break
+            time.sleep(0.005)
+    assert current["status"] == "completed"
+    assert current["result"]["answer"] == "第一段，第二段"
 
 
 def test_chat_exposes_one_digest_tool_call_to_the_model(tmp_path):
