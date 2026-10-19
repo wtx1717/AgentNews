@@ -12,9 +12,14 @@ const state = {
   sessionBusy: false,
   // One active run per session, mirroring the backend's per-session lock.
   activeRuns: new Map(),
+  // 最近一轮已结束运行的耗时，切换回会话时仍可看到。
+  runDurations: new Map(),
   dialogRunId: null,
   pendingApprovalId: null,
   runPoller: null,
+  runTicker: null,
+  // 还没有会话 ID 时（首次发送）也要有计时起点。
+  sendStartedAt: null,
   reportOffset: 0,
   reportLimit: 10,
   reportRequest: 0,
@@ -40,6 +45,8 @@ const elements = {
   chatInput: document.querySelector("#chat-input"),
   chatMessages: document.querySelector("#chat-messages"),
   chatStatus: document.querySelector("#chat-status"),
+  chatRunTimer: document.querySelector("#chat-run-timer"),
+  chatRunTimerValue: document.querySelector("#chat-run-timer-value"),
   chatError: document.querySelector("#chat-error"),
   toolCalls: document.querySelector("#tool-call-count"),
   chatSession: document.querySelector("#chat-session-label"),
@@ -152,12 +159,108 @@ function syncRunPolling() {
   else startRunPolling();
 }
 
+// ---------- 会话运行计时 ----------
+const RUN_TIMER_STATUSES = new Set(["running", "pending_approval"]);
+
+// 毫秒转成紧凑的中文时长：一分钟内保留一位小数，更长时只显示到秒/分。
+function formatRunDuration(milliseconds) {
+  const tenths = Math.floor(Math.max(0, Number(milliseconds) || 0) / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} 秒`;
+  const totalSeconds = Math.floor(tenths / 10);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${String(minutes % 60).padStart(2, "0")} 分`;
+}
+
+function runElapsedMs(run) {
+  return Math.max(0, Date.now() - run.startedAtMs);
+}
+
+function setRunTimerText(text, stateName, title) {
+  if (!elements.chatRunTimer || !elements.chatRunTimerValue) return;
+  elements.chatRunTimerValue.textContent = text;
+  elements.chatRunTimer.dataset.state = stateName;
+  elements.chatRunTimer.title = title;
+  elements.chatRunTimer.setAttribute("aria-label", text);
+  elements.chatRunTimer.hidden = false;
+}
+
+function hideRunTimer() {
+  if (!elements.chatRunTimer) return;
+  elements.chatRunTimer.hidden = true;
+  elements.chatRunTimer.removeAttribute("data-state");
+}
+
+// 当前会话有运行就显示实时计时；运行结束后保留本轮最终耗时。
+function renderRunTimer() {
+  const run = runForSession(state.sessionId);
+  if (run && RUN_TIMER_STATUSES.has(run.status)) {
+    setRunTimerText(
+      `已等待 ${formatRunDuration(runElapsedMs(run))}`,
+      "running",
+      "本轮 AI 工作已用时（人工审核等待也会计入）",
+    );
+    return;
+  }
+  if (state.sendStartedAt !== null) {
+    setRunTimerText(
+      `已等待 ${formatRunDuration(Date.now() - state.sendStartedAt)}`,
+      "running",
+      "本轮 AI 工作已用时（人工审核等待也会计入）",
+    );
+    return;
+  }
+  const finished = state.sessionId ? state.runDurations.get(state.sessionId) : null;
+  if (finished != null) {
+    setRunTimerText(
+      `本轮用时 ${formatRunDuration(finished)}`,
+      "completed",
+      "最近一轮 AI 工作的总用时",
+    );
+    return;
+  }
+  hideRunTimer();
+}
+
+function startRunTicker() {
+  if (state.runTicker !== null) return;
+  state.runTicker = window.setInterval(renderRunTimer, 100);
+}
+
+function stopRunTicker() {
+  if (state.runTicker === null) return;
+  window.clearInterval(state.runTicker);
+  state.runTicker = null;
+}
+
+function syncRunTicker() {
+  if (state.activeRuns.size === 0 && state.sendStartedAt === null) stopRunTicker();
+  else startRunTicker();
+  renderRunTimer();
+}
+
 // 按会话登记进行中的运行，用于锁定该会话输入并在列表中显示运行标记。
-function markSessionRun(sessionId, runId) {
+function markSessionRun(sessionId, runId, elapsedMs = null) {
   if (!sessionId) return;
-  state.activeRuns.set(sessionId, { runId, status: "running", approval: null });
+  state.sendStartedAt = null;
+  const previous = state.activeRuns.get(sessionId);
+  // 同一次运行从“pending”换成正式 run_id 时沿用同一计时起点。
+  const startedAtMs = Number.isFinite(elapsedMs)
+    ? Date.now() - Math.max(0, elapsedMs)
+    : previous && (previous.runId === runId || previous.runId === "pending")
+      ? previous.startedAtMs
+      : Date.now();
+  state.activeRuns.set(sessionId, {
+    runId,
+    status: "running",
+    approval: null,
+    startedAtMs,
+  });
+  state.runDurations.delete(sessionId);
   updateSessionRunIndicators();
   updateChatAvailability();
+  syncRunTicker();
 }
 
 function clearSessionRun(sessionId) {
@@ -169,6 +272,7 @@ function clearSessionRun(sessionId) {
   updateSessionRunIndicators();
   updateChatAvailability();
   if (state.activeRuns.size === 0) stopRunPolling();
+  syncRunTicker();
 }
 
 function updateSessionRunIndicators() {
@@ -196,6 +300,10 @@ function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {})
   if (run) {
     run.status = snapshot.status;
     run.approval = snapshot.approval || null;
+    // 以后端单调计时为准校正本地起点，避免页面计时漂移。
+    if (Number.isFinite(snapshot.elapsed_ms)) {
+      run.startedAtMs = Date.now() - Math.max(0, snapshot.elapsed_ms);
+    }
   }
   if (state.sessionId === sessionId) {
     if (snapshot.status === "pending_approval") setStatus(elements.chatStatus, "pending_approval");
@@ -209,10 +317,19 @@ function applySnapshotToSession(sessionId, snapshot, { showDialog = true } = {})
     renderBashApproval(snapshot.approval);
   }
   updateSessionRunIndicators();
+  if (state.sessionId === sessionId) renderRunTimer();
 }
 
 async function finishChatRun(sessionId, snapshot) {
   const isCurrent = () => state.sessionId === sessionId;
+  const run = runForSession(sessionId);
+  // 优先采用后端的最终耗时；没有时用本地起点兜底，保证同步完成也能显示用时。
+  const elapsed = Number.isFinite(snapshot.elapsed_ms)
+    ? Math.max(0, snapshot.elapsed_ms)
+    : run
+      ? runElapsedMs(run)
+      : null;
+  if (elapsed !== null && sessionId) state.runDurations.set(sessionId, elapsed);
   clearSessionRun(sessionId);
   const result = snapshot.result || {};
   if (snapshot.status === "completed") {
@@ -506,6 +623,7 @@ function clearCurrentSession() {
   setStatus(elements.chatStatus, "idle");
   setError(elements.chatError, "");
   updateChatAvailability();
+  renderRunTimer();
 }
 
 function setCurrentSession(session) {
@@ -523,6 +641,7 @@ function setCurrentSession(session) {
   for (const item of elements.sessionList.querySelectorAll(".session-item")) {
     item.setAttribute("aria-current", String(item.dataset.sessionId === state.sessionId));
   }
+  renderRunTimer();
 }
 
 function setSessionView(status) {
@@ -761,6 +880,11 @@ async function sendChat(event) {
   }
   setError(elements.chatError, "");
   setStatus(elements.chatStatus, "running");
+  state.runDurations.delete(requestSessionId);
+  // 首次发送时后端才会创建会话；先本地计时，拿到 run 后由后端时间校正。
+  state.sendStartedAt = Date.now();
+  startRunTicker();
+  renderRunTimer();
   appendMessage("user", message);
   elements.chatInput.value = "";
   markSessionRun(requestSessionId, "pending");
@@ -773,16 +897,29 @@ async function sendChat(event) {
     // the session for a new run comes back in `session_id`, not in the result.
     if (result.status === "pending_approval" || result.status === "running") {
       const runSessionId = result.session_id || requestSessionId;
-      markSessionRun(runSessionId, result.run_id);
+      markSessionRun(runSessionId, result.run_id, result.elapsed_ms);
+      if (!state.sessionId && runSessionId) {
+        // 新会话由后端创建；切到该会话才能看到本轮计时与消息。
+        await loadSessionDetail(runSessionId);
+      }
       applySnapshotToSession(runSessionId, result);
       syncRunPolling();
     } else {
       const finishedSessionId = result.session_id || requestSessionId;
-      await finishChatRun(finishedSessionId, { status: "completed", result, session_id: finishedSessionId });
+      const elapsed = state.sendStartedAt !== null ? Date.now() - state.sendStartedAt : null;
+      state.sendStartedAt = null;
+      await finishChatRun(finishedSessionId, {
+        status: "completed",
+        result,
+        session_id: finishedSessionId,
+        elapsed_ms: elapsed,
+      });
       return;
     }
   } catch (error) {
+    state.sendStartedAt = null;
     clearSessionRun(requestSessionId);
+    syncRunTicker();
     if (error.code === "run_busy") {
       setError(elements.chatError, error.message);
       if (state.sessionId === requestSessionId) setStatus(elements.chatStatus, "running");

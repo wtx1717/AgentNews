@@ -122,8 +122,11 @@ h4 { margin: 0; font-size: 13px; }
 .status-failed::before { background: #c85c4c; }
 .subtle-status { justify-content: flex-end; }
 @keyframes pulse { to { opacity: .35; } }
-.chat-heading-actions { display: flex; align-items: center; gap: 10px; }
+.chat-heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .chat-heading-actions .button-secondary { min-height: 30px; padding: 0 10px; font-size: 11px; }
+.run-timer { min-height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid #e4d3af; border-radius: 999px; background: #fdf8ee; color: #8a5a14; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-timer svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.run-timer[data-state="completed"] { border-color: var(--line); background: #f4f8f5; color: #5f6c65; }
 
 /* ---------- Conversation ---------- */
 

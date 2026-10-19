@@ -269,6 +269,31 @@ def test_approval_snapshot_reports_the_interpreter(tmp_path):
     assert snapshot["approval"]["interpreter"] == INTERPRETER_LABEL
 
 
+def test_run_snapshot_reports_a_frozen_elapsed_time(tmp_path):
+    repository, bash_service, _report_storage, _source_storage = _services(tmp_path)
+
+    class SlowChatService:
+        async def run(self, message, session_id, *, bash_approval_handler, run_id):
+            await asyncio.sleep(0.02)
+            return ChatResult(session_id, "完成", 0)
+
+    manager = ChatRunManager(repository, SlowChatService(), bash_service)
+
+    async def scenario():
+        record = await manager.start("计时")
+        await asyncio.wait_for(record.task, timeout=1)
+        first = manager.snapshot(record.id)
+        await asyncio.sleep(0.02)
+        return first, manager.snapshot(record.id)
+
+    first, second = asyncio.run(scenario())
+
+    assert first["started_at"]
+    assert first["elapsed_ms"] >= 10
+    # 终态后计时必须冻结，轮询不能把耗时继续拉长。
+    assert second["elapsed_ms"] == first["elapsed_ms"]
+
+
 def test_execute_returns_an_error_object_when_the_process_fails(tmp_path):
     _repository, service, _report_storage, _source_storage = _services(tmp_path)
 

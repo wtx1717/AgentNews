@@ -382,6 +382,9 @@ class BashService:
 class _RunRecord:
     id: str
     session_id: str
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_monotonic: float = field(default_factory=time.monotonic)
+    finished_monotonic: float | None = None
     status: str = "running"
     task: asyncio.Task[Any] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -390,6 +393,15 @@ class _RunRecord:
     approval: BashApproval | None = None
     approval_future: asyncio.Future[str] | None = None
     error_code: str | None = None
+
+    def elapsed_ms(self) -> int:
+        """返回本轮已运行毫秒数；进入终态后冻结，避免轮询继续累加。"""
+        end = (
+            self.finished_monotonic
+            if self.finished_monotonic is not None
+            else time.monotonic()
+        )
+        return max(0, int((end - self.started_monotonic) * 1000))
 
 
 class ChatRunManager:
@@ -467,6 +479,8 @@ class ChatRunManager:
                 record.error_code = _error_code(error)
         finally:
             self._active_by_session.pop(record.session_id, None)
+            if record.finished_monotonic is None:
+                record.finished_monotonic = time.monotonic()
             # 唤醒等待中的请求方，避免其一直阻塞。
             record.changed.set()
 
@@ -577,6 +591,8 @@ class ChatRunManager:
             "run_id": record.id,
             "session_id": record.session_id,
             "status": record.status,
+            "started_at": record.started_at.isoformat(),
+            "elapsed_ms": record.elapsed_ms(),
         }
         if record.approval is not None and record.status == "pending_approval":
             payload["approval"] = record.approval.to_dict(

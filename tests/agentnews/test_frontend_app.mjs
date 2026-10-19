@@ -666,6 +666,51 @@ test("an approval request blocks input, resumes the run and completes", async ()
   }
 });
 
+test("a running conversation shows elapsed time and keeps the final duration", async () => {
+  const harness = await startApp({
+    storedSession: "s1",
+    responses: {
+      "POST /api/chat": {
+        status: 202,
+        __body: {
+          run_id: "r1",
+          session_id: "s1",
+          status: "running",
+          elapsed_ms: 3400,
+        },
+      },
+      "GET /api/chat/runs/r1": {
+        __body: {
+          run_id: "r1",
+          session_id: "s1",
+          status: "completed",
+          elapsed_ms: 5200,
+          result: { session_id: "s1", answer: "已执行", tool_calls: 2, report_ids: [] },
+        },
+      },
+    },
+  });
+  try {
+    const { document } = harness;
+    document.querySelector("#chat-input").value = "执行一个耗时任务";
+    document.querySelector("#chat-form").dispatch("submit");
+    await settle();
+    const timer = document.querySelector("#chat-run-timer");
+    assert.equal(timer.hidden, false);
+    assert.equal(timer.getAttribute("data-state"), "running");
+    assert.match(document.querySelector("#chat-run-timer-value").textContent, /^已等待 3\.\d 秒$/);
+
+    harness.timers.forEach((handler) => handler());
+    await settle();
+    assert.equal(timer.hidden, false);
+    assert.equal(timer.getAttribute("data-state"), "completed");
+    assert.equal(document.querySelector("#chat-run-timer-value").textContent, "本轮用时 5.2 秒");
+    assert.equal(document.querySelector("#chat-status").textContent, "完成 · 2 次工具调用");
+  } finally {
+    harness.restore();
+  }
+});
+
 test("an agent error reply is surfaced without leaking internals", async () => {
   const harness = await startApp({
     storedSession: "s1",

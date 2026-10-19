@@ -75,6 +75,10 @@
             <div class="chat-heading-actions">
               <button id="restore-current-session" class="button button-secondary session-control" type="button" hidden>恢复会话</button>
               <span id="chat-status" class="status status-idle" role="status" aria-live="polite">尚未执行</span>
+              <span id="chat-run-timer" class="run-timer" role="timer" aria-label="本轮 AI 工作已用时" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>
+                <span id="chat-run-timer-value">0.0 秒</span>
+              </span>
             </div>
           </div>
           <div id="chat-messages" class="chat-messages" aria-live="polite" aria-relevant="additions">
