@@ -72,13 +72,20 @@ API key 也能启动并加载本地配置；没填（留空）的项会被视为
 uv run agentnews
 ```
 
-该命令会初始化 `SQLITE_PATH` 指向的 SQLite 数据库、执行所有未应用的迁移，然后
-报告命令行入口就绪。
+默认地址是 <http://127.0.0.1:8000>。命令会先初始化 `SQLITE_PATH` 指向的数据库并执行
+所有未应用的迁移，然后启动 FastAPI 服务，默认开启代码热重载。
 
-启动本地 FastAPI 服务：
+需要改端口或关闭热重载时：
 
 ```powershell
-uv run uvicorn agentnews.api:app --reload
+uv run agentnews --port 8080
+uv run agentnews --no-reload
+```
+
+只准备数据库、不启动服务：
+
+```powershell
+uv run agentnews init-db
 ```
 
 API 启动不依赖任何外部凭据。未配置模型或搜索服务时，对话和日报接口会返回
@@ -94,9 +101,9 @@ Markdown 日报存放在 `REPORT_ROOT`（默认 `data/reports`）下的
 ## 数据库与迁移
 
 `src/agentnews/db/migrations.py` 就是迁移脚本：六个带版本号的幂等迁移按版本升序
-执行，每个迁移各自一个事务，执行后把版本记录进 `schema_migrations`。命令行入口
-和 FastAPI 启动都会调用 `initialize_database`，所以手工准备一个数据库只需
-`uv run agentnews`。
+执行，每个迁移各自一个事务，执行后把版本记录进 `schema_migrations`。命令行入口在
+启动服务或执行 `init-db` 时都会调用 `initialize_database`，SQLite 仓储初始化时也会
+执行未应用的迁移；只需准备数据库可运行 `uv run agentnews init-db`。
 
 `docs/schema.sql` 是在空库上完整执行所有迁移后导出的 `CREATE TABLE` /
 `CREATE INDEX` 语句，仅作为可读参考；schema 的权威来源始终是 `migrations.py`。
@@ -204,8 +211,8 @@ SMTP 配置不完整返回 `smtp_not_configured`，没有配置任何主题或�
 
 调度规则：
 
-- 调度器运行在应用进程内（`uvicorn` 或任何长驻进程），每 30 秒轮询一次。进程
-  停止期间不会生成任何日报；`uv run agentnews` 只准备数据库，不会启动调度。
+- 调度器运行在应用进程内（`uv run agentnews` 启动的服务），每 30 秒轮询一次。进程
+  停止期间不会生成任何日报；`uv run agentnews init-db` 只准备数据库，不会启动调度。
 - 触发条件是「保存时区的本地时间到达 `daily_send_time`」且该业务日期还没有运行
   记录。
 - 每个业务日期只有一条运行记录：`scheduled_digest_runs.business_date` 有 UNIQUE
